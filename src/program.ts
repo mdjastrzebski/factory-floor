@@ -41,7 +41,6 @@ async function clackPromptInput(input: InputPrompt): Promise<string> {
   const value = await text({
     message: `${pc.bold(input.id)}${description}`,
     initialValue: input.default,
-    defaultValue: input.default,
     validate: (value) => (input.required && !value ? `"${input.id}" is required` : undefined),
   });
   if (isCancel(value)) throw new FlowRunError("Cancelled");
