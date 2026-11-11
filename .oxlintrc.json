@@ -1,0 +1,7 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "env": {
+    "node": true
+  },
+  "ignorePatterns": ["dist", "node_modules", "examples/hello-flow/src", "examples/hello-flow/test"]
+}

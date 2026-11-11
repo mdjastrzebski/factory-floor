@@ -1,0 +1,36 @@
+{
+  "name": "factory-floor",
+  "version": "0.1.0",
+  "description": "Run a linear sequence of AI coding-agent steps against a shared working directory, defined in a YAML flow file.",
+  "bin": {
+    "factory-floor": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
+    "dev": "tsx src/cli.ts",
+    "factory-floor": "node dist/cli.js",
+    "test": "node --test",
+    "lint": "oxlint .",
+    "format": "oxfmt --check .",
+    "format:write": "oxfmt ."
+  },
+  "dependencies": {
+    "yaml": "^2.9.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "oxfmt": "^0.78.0",
+    "oxlint": "^1.93.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@11.24.0"
+}
