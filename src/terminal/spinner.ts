@@ -1,3 +1,17 @@
+/**
+ * A local replacement for `spinner()` from `@clack/prompts` (v1.9), which we
+ * stopped using in "fix spinners" (6239f50). clack's spinner:
+ * - reads the terminal width once at creation, so after the terminal narrows
+ *   its erase math is wrong and stale frames pile up in scrollback;
+ * - puts a TTY stdin into raw mode (via `block()`) and calls `process.exit(0)`
+ *   on Ctrl-C, skipping our SIGINT handler and orphaning the `claude` child;
+ * - leaves its frame on the line with no way to clear it, so interleaved
+ *   `log.*` output gets glued onto it (hence `erase()` here).
+ * This one never touches stdin, re-measures on every frame and on resize, and
+ * truncates the message to fit one line. It copies clack's look (frames,
+ * timing, magenta frame, `S_BAR` / `S_STEP_*` symbols imported from clack);
+ * keep those in sync if clack's visuals change.
+ */
 import { S_BAR, S_STEP_CANCEL, S_STEP_ERROR, S_STEP_SUBMIT, unicode } from "@clack/prompts";
 import stringWidth from "fast-string-width";
 import truncatedWidth from "fast-string-truncated-width";
@@ -37,13 +51,9 @@ export function truncateAnsi(text: string, max: number): string {
 }
 
 /**
- * A clack-styled spinner that, unlike clack's own, measures the terminal on
- * every frame. When a terminal narrows it reflows the line the frame is on,
- * so the previous frame may now span several rows; erasing it correctly needs
- * its exact width and the *current* column count, both of which clack's
- * spinner fixes at creation time.
- *
- * Without a TTY it prints each distinct message as its own line instead.
+ * Creates a clack-styled spinner. A narrowed terminal reflows the frame's
+ * line, so erasing it uses the frame's exact width and the *current* column
+ * count. Without a TTY it prints each distinct message as its own line instead.
  */
 export function createSpinner(output: SpinnerOutput = process.stdout): Spinner {
   const interactive = output.isTTY === true && process.env.TERM !== "dumb";
