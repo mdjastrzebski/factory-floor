@@ -5,7 +5,6 @@ import {
   TemplateSyntaxError,
   buildVariables,
   checkReferences,
-  listReferences,
   parseTemplate,
   renderTemplate,
 } from "../src/template.ts";
@@ -38,11 +37,6 @@ test("adjacent and repeated references", () => {
     parseTemplate("${{a}}${{ b }}${{a}}").map((s) => (s.kind === "ref" ? s.name : s.text)),
     ["a", "b", "a"],
   );
-});
-
-test("listReferences returns unique names in order of first appearance", () => {
-  assert.deepEqual(listReferences("${{ b }} ${{ a }} ${{ b }} ${{ c.d }}"), ["b", "a", "c.d"]);
-  assert.deepEqual(listReferences("none"), []);
 });
 
 test("unterminated, empty and invalid references throw TemplateSyntaxError", () => {

@@ -88,15 +88,6 @@ function excerpt(template: string, start: number): string {
   return text.length < template.length - start ? `${text}…` : text;
 }
 
-/** Unique reference names in order of first appearance. */
-export function listReferences(template: string): string[] {
-  const names = new Set<string>();
-  for (const segment of parseTemplate(template)) {
-    if (segment.kind === "ref") names.add(segment.name);
-  }
-  return [...names];
-}
-
 /**
  * Renders a template with a flat name-to-value map. Single pass, left to
  * right: substituted values are inserted verbatim and never scanned again.
