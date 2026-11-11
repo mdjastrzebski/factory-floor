@@ -38,7 +38,7 @@ test("parseStreamJsonLine renders tool_use blocks as an arrow line", () => {
   });
   const result = parseStreamJsonLine(line);
   assert.deepEqual(result, {
-    displayChunks: ["\n→ Bash\n"],
+    displayChunks: ["→ Bash\n"],
     toolCalls: [{ name: "Bash", activity: "Running command" }],
     denials: [],
   });
@@ -57,7 +57,7 @@ test("parseStreamJsonLine handles multiple content blocks in order", () => {
   });
   const result = parseStreamJsonLine(line);
   assert.deepEqual(result, {
-    displayChunks: ["doing a thing", "\n→ Edit\n", "done"],
+    displayChunks: ["doing a thing", "→ Edit\n", "done"],
     toolCalls: [{ name: "Edit", activity: "Editing file" }],
     denials: [],
   });
@@ -113,11 +113,11 @@ test("parseStreamJsonLine exposes tool_use blocks as structured tool calls with 
   ]);
   // The display text includes the detail, for verbose mode.
   assert.deepEqual(result?.displayChunks, [
-    "\n→ Edit src/foo.ts\n",
+    "→ Edit src/foo.ts\n",
     "now testing",
-    "\n→ Bash npm test\n",
-    "\n→ Grep TODO\n",
-    "\n→ TodoWrite\n",
+    "→ Bash npm test\n",
+    "→ Grep TODO\n",
+    "→ TodoWrite\n",
   ]);
 });
 

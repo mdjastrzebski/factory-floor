@@ -50,7 +50,7 @@ export function parseStreamJsonLine(line: string): ParsedStreamJsonLine | undefi
         displayChunks.push(b.text);
       } else if (b.type === "tool_use" && typeof b.name === "string") {
         const detail = toolCallDetail(b.input);
-        displayChunks.push(`\n→ ${b.name}${detail ? ` ${detail.split("\n")[0].trim()}` : ""}\n`);
+        displayChunks.push(`→ ${b.name}${detail ? ` ${detail.split("\n")[0].trim()}` : ""}\n`);
         const activity = TOOL_ACTIVITY[b.name];
         toolCalls.push({ name: b.name, ...(detail !== undefined && { detail }), ...(activity && { activity }) });
       }
