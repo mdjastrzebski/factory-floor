@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import { once } from "node:events";
+import spawn, { SubprocessError } from "nano-spawn";
 import type { Harness, HarnessResult, HarnessRunOptions } from "../harness.ts";
 import { parseStreamJsonLine } from "./stream-json-parser.ts";
 
@@ -17,97 +18,107 @@ import { parseStreamJsonLine } from "./stream-json-parser.ts";
  * surfaced as a warning instead of silently degrading the step.
  */
 export class ClaudeCliHarness implements Harness {
-  run(options: HarnessRunOptions): Promise<HarnessResult> {
-    const { cwd, prompt, onOutputChunk, signal } = options;
+  async run(options: HarnessRunOptions): Promise<HarnessResult> {
+    const { cwd, prompt, onOutputChunk, onToolCall, signal } = options;
 
-    return new Promise((resolve, reject) => {
-      const child = spawn(
-        "claude",
-        [
-          "-p",
-          prompt,
-          "--permission-mode",
-          "auto",
-          "--permission-prompts",
-          "none",
-          "--output-format",
-          "stream-json",
-          "--verbose",
-        ],
-        {
-          cwd,
-          stdio: ["ignore", "pipe", "pipe"],
-        },
-      );
+    // `signal` is passed through to `child_process.spawn`, which sends the
+    // child SIGTERM (its default `killSignal`) when the signal aborts.
+    const subprocess = spawn(
+      "claude",
+      [
+        "-p",
+        prompt,
+        "--permission-mode",
+        "auto",
+        "--permission-prompts",
+        "none",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+      ],
+      { cwd, signal, stdin: "ignore" },
+    );
 
-      let stdout = "";
-      let stderr = "";
-      let settled = false;
-      let lineBuffer = "";
-      const permissionDenials: string[] = [];
+    let started = false;
+    subprocess.nodeChildProcess.then(
+      () => {
+        started = true;
+      },
+      () => {},
+    );
 
-      const onAbort = () => {
-        child.kill("SIGTERM");
-      };
-      if (signal) {
-        if (signal.aborted) {
-          onAbort();
-        } else {
-          signal.addEventListener("abort", onAbort, { once: true });
-        }
-      }
+    // nano-spawn leaves `result.stdout`/`result.stderr` empty once the line
+    // iterators are consumed, so the full text is accumulated here instead.
+    // nano-spawn's iterators split on newlines (decoding UTF-8 across chunk
+    // boundaries), so each line is re-joined with "\n".
+    let stdout = "";
+    let stderr = "";
+    const permissionDenials: string[] = [];
 
-      const cleanup = () => {
-        if (signal) {
-          signal.removeEventListener("abort", onAbort);
-        }
-      };
-
-      const handleLine = (line: string) => {
+    const readStdout = async () => {
+      for await (const line of subprocess.stdout) {
+        stdout += `${line}\n`;
         const parsed = parseStreamJsonLine(line);
-        if (!parsed) return;
+        if (!parsed) continue;
         for (const chunk of parsed.displayChunks) {
           onOutputChunk?.(chunk, "stdout");
         }
+        for (const call of parsed.toolCalls) {
+          onToolCall?.(call);
+        }
         permissionDenials.push(...parsed.denials);
-      };
+      }
+    };
 
-      child.stdout?.setEncoding("utf8");
-      child.stderr?.setEncoding("utf8");
+    const readStderr = async () => {
+      for await (const line of subprocess.stderr) {
+        stderr += `${line}\n`;
+        onOutputChunk?.(`${line}\n`, "stderr");
+      }
+    };
 
-      child.stdout?.on("data", (chunk: string) => {
-        stdout += chunk;
-        lineBuffer += chunk;
-        const lines = lineBuffer.split("\n");
-        lineBuffer = lines.pop() ?? "";
-        for (const line of lines) handleLine(line);
-      });
+    // Both iterators must start right away (same tick as `spawn`), or
+    // nano-spawn starts buffering that stream itself and refuses to iterate it.
+    const reading = Promise.allSettled([readStdout(), readStderr()]);
 
-      child.stderr?.on("data", (chunk: string) => {
-        stderr += chunk;
-        onOutputChunk?.(chunk, "stderr");
-      });
+    let exitCode: number | null = 0;
+    try {
+      await subprocess;
+    } catch (error) {
+      await reading;
+      // The process never started (e.g. `claude` not on PATH): surface the
+      // underlying spawn error, as `child_process`'s "error" event did.
+      if (!started) {
+        throw error instanceof SubprocessError && error.cause instanceof Error
+          ? error.cause
+          : error;
+      }
+      if (!(error instanceof SubprocessError)) throw error;
+      // On abort, nano-spawn rejects as soon as Node reports the `AbortError`,
+      // before the SIGTERM'd child has actually exited. Wait for it, so (as
+      // before) `run` only settles once the process is gone.
+      const child = await subprocess.nodeChildProcess;
+      if (child.exitCode === null && child.signalCode === null) {
+        await once(child, "exit");
+      }
+      // `exitCode` is undefined when the process was killed by a signal (e.g. on abort).
+      exitCode = error.exitCode ?? null;
+    }
 
-      child.on("error", (error) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(error);
-      });
+    // The iterators rethrow the subprocess's own failure (handled above);
+    // anything else (e.g. a throwing callback) is a real error.
+    for (const outcome of await reading) {
+      if (outcome.status === "rejected" && !(outcome.reason instanceof SubprocessError)) {
+        throw outcome.reason;
+      }
+    }
 
-      child.on("close", (exitCode) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        if (lineBuffer) handleLine(lineBuffer);
-        resolve({
-          success: exitCode === 0,
-          exitCode,
-          stdout,
-          stderr,
-          permissionDenials: permissionDenials.length > 0 ? permissionDenials : undefined,
-        });
-      });
-    });
+    return {
+      success: exitCode === 0,
+      exitCode,
+      stdout,
+      stderr,
+      permissionDenials: permissionDenials.length > 0 ? permissionDenials : undefined,
+    };
   }
 }

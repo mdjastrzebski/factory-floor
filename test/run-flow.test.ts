@@ -250,3 +250,37 @@ steps:
   await assert.rejects(() => runFlow({ flowPath, verbose: false, harness }), FlowRunError);
   assert.equal(harness.calls.length, 0);
 });
+
+test("forwards harness tool calls to onToolCall with the step name, even when not verbose", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "factory-floor-test-"));
+  const flowPath = writeFlow(
+    dir,
+    `
+steps:
+  - name: Only Step
+    prompt: do it
+`,
+  );
+
+  const harness: Harness = {
+    async run(options) {
+      options.onToolCall?.({ name: "Edit", detail: "src/a.ts" });
+      options.onToolCall?.({ name: "Bash" });
+      return ok();
+    },
+  };
+
+  const calls: unknown[] = [];
+  const result = await runFlow({
+    flowPath,
+    verbose: false,
+    harness,
+    onToolCall: (stepName, call) => calls.push([stepName, call]),
+  });
+
+  assert.equal(result.success, true);
+  assert.deepEqual(calls, [
+    ["Only Step", { name: "Edit", detail: "src/a.ts" }],
+    ["Only Step", { name: "Bash" }],
+  ]);
+});

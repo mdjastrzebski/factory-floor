@@ -4,9 +4,13 @@
  * spawning a real `claude` binary.
  */
 
+import type { ToolCall } from "../harness.ts";
+
 export interface ParsedStreamJsonLine {
   /** Chunks of human-readable text to surface via `onOutputChunk`, in order. */
   displayChunks: string[];
+  /** Structured summaries of any tool calls started on this line, in order. */
+  toolCalls: ToolCall[];
   /** Human-readable descriptions of any permission denials found on this line. */
   denials: string[];
 }
@@ -26,13 +30,14 @@ export function parseStreamJsonLine(line: string): ParsedStreamJsonLine | undefi
   try {
     event = JSON.parse(line);
   } catch {
-    return { displayChunks: [`${line}\n`], denials: [] };
+    return { displayChunks: [`${line}\n`], toolCalls: [], denials: [] };
   }
 
   if (typeof event !== "object" || event === null) return undefined;
   const e = event as Record<string, unknown>;
 
   const displayChunks: string[] = [];
+  const toolCalls: ToolCall[] = [];
   const denials: string[] = [];
 
   if (e.type === "assistant") {
@@ -45,6 +50,8 @@ export function parseStreamJsonLine(line: string): ParsedStreamJsonLine | undefi
         displayChunks.push(b.text);
       } else if (b.type === "tool_use" && typeof b.name === "string") {
         displayChunks.push(`\n→ ${b.name}\n`);
+        const detail = toolCallDetail(b.input);
+        toolCalls.push(detail === undefined ? { name: b.name } : { name: b.name, detail });
       }
     }
   } else if (e.type === "result") {
@@ -56,7 +63,21 @@ export function parseStreamJsonLine(line: string): ParsedStreamJsonLine | undefi
     }
   }
 
-  return { displayChunks, denials };
+  return { displayChunks, toolCalls, denials };
+}
+
+/** Input fields checked, in order, for a tool call's primary argument. */
+const DETAIL_FIELDS = ["file_path", "notebook_path", "command", "pattern", "path", "url"] as const;
+
+/** Picks the primary argument (file path, command, ...) out of a `tool_use` block's `input`, if any. */
+function toolCallDetail(input: unknown): string | undefined {
+  if (typeof input !== "object" || input === null) return undefined;
+  const fields = input as Record<string, unknown>;
+  for (const field of DETAIL_FIELDS) {
+    const value = fields[field];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return undefined;
 }
 
 /** Renders a `permission_denials` entry (shape not strictly documented) as one readable line. */

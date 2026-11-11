@@ -1,6 +1,6 @@
 import { mkdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import type { Harness, HarnessResult } from "./harness.ts";
+import type { Harness, HarnessResult, ToolCall } from "./harness.ts";
 import { loadFlow } from "./flow-schema.ts";
 import { uniqueSlug } from "./slug.ts";
 
@@ -38,6 +38,11 @@ export interface RunFlowOptions {
   /** Called with each raw output chunk while `verbose` is true, for live streaming to the terminal. */
   onOutputChunk?: OutputChunkListener;
   /**
+   * Called each time the agent starts a tool call during a step, regardless
+   * of `verbose`, for live activity display (e.g. updating a spinner).
+   */
+  onToolCall?: (stepName: string, call: ToolCall) => void;
+  /**
    * Called once per permission/tool request the harness denied during a
    * step, regardless of `verbose` - these indicate the step may not have
    * been able to do what its prompt asked (e.g. a blocked Bash command).
@@ -72,6 +77,7 @@ export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
     onStepStart,
     onStepComplete,
     onOutputChunk,
+    onToolCall,
     onWarning,
     signal,
   } = options;
@@ -116,6 +122,7 @@ export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
         onOutputChunk: verbose
           ? (chunk, stream) => onOutputChunk?.(step.name, chunk, stream)
           : undefined,
+        onToolCall: onToolCall ? (call) => onToolCall(step.name, call) : undefined,
       });
     } catch (error) {
       const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
