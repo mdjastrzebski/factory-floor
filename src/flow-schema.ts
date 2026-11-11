@@ -87,94 +87,17 @@ export const StepSchema = z
 /**
  * A flow as written in YAML. Like a GitHub Actions workflow, `name` is the
  * human-readable title; `id` is the slug identifier (GitHub derives it from
- * the file name, which is also the default here).
+ * the file name, which is also the default here). This checks shape only;
+ * cross-references (ids, bindings, input sources, prompt references) are
+ * checked while resolving, see {@link resolveFlow}.
  */
-export const FlowSchema = z
-  .object({
-    id: idSchema("flow").optional(),
-    name: z.string().min(1, "flow name must be a non-empty string").optional(),
-    cwd: z.string().optional(),
-    inputs: z.record(z.string(), InputSchema).optional(),
-    steps: z.array(StepSchema).min(1, "flow must have at least one step"),
-  })
-  .superRefine((flow, ctx) => {
-    const inputIds = Object.keys(flow.inputs ?? {});
-    for (const [id, input] of Object.entries(flow.inputs ?? {})) {
-      const idResult = idSchema("input").safeParse(id);
-      if (!idResult.success) {
-        ctx.addIssue({
-          code: "custom",
-          message: `${idResult.error.issues[0].message} (got "${id}")`,
-          path: ["inputs", id],
-        });
-      } else if (input.default !== undefined && input.required === true) {
-        ctx.addIssue({
-          code: "custom",
-          message: `input "${id}" has a default, so it cannot be required: true`,
-          path: ["inputs", id, "required"],
-        });
-      }
-    }
-
-    const stepIds = resolveStepIds(flow.steps);
-    flow.steps.forEach((step, index) => {
-      const scope = { preceding: stepIds.slice(0, index), all: stepIds };
-      const stepInputs = step.inputs === undefined ? undefined : Object.entries(step.inputs);
-      for (const [id, value] of stepInputs ?? []) {
-        const path = ["steps", index, "inputs", id];
-        const label = `step "${stepIds[index]}" input "${id}"`;
-        const idResult = idSchema("input").safeParse(id);
-        if (!idResult.success) {
-          ctx.addIssue({
-            code: "custom",
-            message: `${idResult.error.issues[0].message} (got "${id}")`,
-            path,
-          });
-        } else if (typeof value === "string") {
-          for (const message of checkReferences(value, inputIds, scope)) {
-            ctx.addIssue({ code: "custom", message: `${label}: ${message}`, path });
-          }
-        } else if (value.default !== undefined && value.required === true) {
-          ctx.addIssue({
-            code: "custom",
-            message: `${label} has a default, so it cannot be required: true`,
-            path: [...path, "required"],
-          });
-        } else if (
-          !inputIds.includes(id) &&
-          value.default === undefined &&
-          value.required !== false
-        ) {
-          ctx.addIssue({
-            code: "custom",
-            message: `${label} has no source: no flow input or earlier step output is named "${id}", and it has no default`,
-            path,
-          });
-        }
-      }
-      const visible = stepInputs ? stepInputs.map(([id]) => id) : inputIds;
-      for (const message of checkReferences(step.prompt, visible)) {
-        ctx.addIssue({ code: "custom", message, path: ["steps", index, "prompt"] });
-      }
-    });
-
-    const seen = new Map<string, number>();
-    flow.steps.forEach((step, index) => {
-      const key = step.id ?? step.name;
-      if (key === undefined) return;
-      const field = step.id !== undefined ? "id" : "name";
-      const firstIndex = seen.get(`${field}:${key}`);
-      if (firstIndex !== undefined) {
-        ctx.addIssue({
-          code: "custom",
-          message: `duplicate step ${field} "${key}" (first used at steps[${firstIndex}], again at steps[${index}])`,
-          path: ["steps", index, field],
-        });
-      } else {
-        seen.set(`${field}:${key}`, index);
-      }
-    });
-  });
+export const FlowSchema = z.object({
+  id: idSchema("flow").optional(),
+  name: z.string().min(1, "flow name must be a non-empty string").optional(),
+  cwd: z.string().optional(),
+  inputs: z.record(z.string(), InputSchema).optional(),
+  steps: z.array(StepSchema).min(1, "flow must have at least one step"),
+});
 
 export type RawStep = z.infer<typeof StepSchema>;
 export type RawFlow = z.infer<typeof FlowSchema>;
@@ -244,36 +167,122 @@ function resolveStepIds(steps: readonly { id?: string; name?: string }[]): strin
   return steps.map((step) => step.id ?? uniqueSlug(step.name ?? "", used));
 }
 
-/** Resolves one validated step input to its source; see {@link StepInputSource}. */
-function resolveStepInput(id: string, value: RawStepInput, flowInputIds: string[]): StepInput {
-  if (typeof value === "string") return { id, source: { kind: "binding", template: value } };
-  const source: StepInputSource = flowInputIds.includes(id)
-    ? { kind: "flowInput", id }
-    : { kind: "value", value: value.default ?? "" };
-  return { id, ...(value.description !== undefined && { description: value.description }), source };
+/** A load-time problem with a flow file, reported like a zod issue. */
+interface FlowIssue {
+  message: string;
+  path: (string | number)[];
 }
 
 /**
- * Fills in defaults: step ids (see {@link resolveStepIds}); a missing `name`
- * falls back to the `id`; step inputs are resolved to their sources.
+ * The source of a step input: an explicit binding, else the flow input of the
+ * same name, else its default (`""` when optional with none). `undefined`
+ * means it has no source. This is the only place that rule lives.
  */
-function resolveFlow(raw: RawFlow, flowPath: string): Flow {
-  const id = raw.id ?? slugify(basename(flowPath, extname(flowPath)), "flow");
-  const stepIds = resolveStepIds(raw.steps);
+function resolveStepInputSource(
+  id: string,
+  value: RawStepInput,
+  flowInputIds: readonly string[],
+): StepInputSource | undefined {
+  if (typeof value === "string") return { kind: "binding", template: value };
+  if (flowInputIds.includes(id)) return { kind: "flowInput", id };
+  if (value.default !== undefined) return { kind: "value", value: value.default };
+  if (value.required === false) return { kind: "value", value: "" };
+  return undefined;
+}
+
+/**
+ * Checks cross-references and fills in defaults in one pass: step ids (see
+ * {@link resolveStepIds}); a missing `name` falls back to the `id`; step
+ * inputs are resolved to their sources. Returns the resolved flow, or every
+ * issue found.
+ */
+function resolveFlow(
+  raw: RawFlow,
+  flowPath: string,
+): { ok: true; flow: Flow } | { ok: false; issues: FlowIssue[] } {
+  const issues: FlowIssue[] = [];
   const flowInputIds = Object.keys(raw.inputs ?? {});
+  for (const [id, input] of Object.entries(raw.inputs ?? {})) {
+    const idResult = idSchema("input").safeParse(id);
+    if (!idResult.success) {
+      issues.push({
+        message: `${idResult.error.issues[0].message} (got "${id}")`,
+        path: ["inputs", id],
+      });
+    } else if (input.default !== undefined && input.required === true) {
+      issues.push({
+        message: `input "${id}" has a default, so it cannot be required: true`,
+        path: ["inputs", id, "required"],
+      });
+    }
+  }
+
+  const stepIds = resolveStepIds(raw.steps);
   const steps = raw.steps.map((step, index): Step => {
     const stepId = stepIds[index];
+    const scope = { preceding: stepIds.slice(0, index), all: stepIds };
+    const stepInputs = step.inputs === undefined ? undefined : Object.entries(step.inputs);
+    const inputs: StepInput[] = [];
+    for (const [id, value] of stepInputs ?? []) {
+      const path = ["steps", index, "inputs", id];
+      const label = `step "${stepId}" input "${id}"`;
+      const idResult = idSchema("input").safeParse(id);
+      if (!idResult.success) {
+        issues.push({ message: `${idResult.error.issues[0].message} (got "${id}")`, path });
+        continue;
+      }
+      if (typeof value === "string") {
+        for (const message of checkReferences(value, flowInputIds, scope)) {
+          issues.push({ message: `${label}: ${message}`, path });
+        }
+      } else if (value.default !== undefined && value.required === true) {
+        issues.push({
+          message: `${label} has a default, so it cannot be required: true`,
+          path: [...path, "required"],
+        });
+        continue;
+      }
+      const source = resolveStepInputSource(id, value, flowInputIds);
+      if (source === undefined) {
+        issues.push({
+          message: `${label} has no source: no flow input or earlier step output is named "${id}", and it has no default`,
+          path,
+        });
+        continue;
+      }
+      const description = typeof value === "string" ? undefined : value.description;
+      inputs.push({ id, ...(description !== undefined && { description }), source });
+    }
+    const visible = stepInputs ? stepInputs.map(([id]) => id) : flowInputIds;
+    for (const message of checkReferences(step.prompt, visible)) {
+      issues.push({ message, path: ["steps", index, "prompt"] });
+    }
     return {
       id: stepId,
       name: step.name ?? stepId,
-      ...(step.inputs !== undefined && {
-        inputs: Object.entries(step.inputs).map(([inputId, value]) =>
-          resolveStepInput(inputId, value, flowInputIds),
-        ),
-      }),
+      ...(stepInputs !== undefined && { inputs }),
       prompt: step.prompt,
     };
   });
+
+  const seen = new Map<string, number>();
+  raw.steps.forEach((step, index) => {
+    const key = step.id ?? step.name;
+    if (key === undefined) return;
+    const field = step.id !== undefined ? "id" : "name";
+    const firstIndex = seen.get(`${field}:${key}`);
+    if (firstIndex !== undefined) {
+      issues.push({
+        message: `duplicate step ${field} "${key}" (first used at steps[${firstIndex}], again at steps[${index}])`,
+        path: ["steps", index, field],
+      });
+    } else {
+      seen.set(`${field}:${key}`, index);
+    }
+  });
+  if (issues.length > 0) return { ok: false, issues };
+
+  const id = raw.id ?? slugify(basename(flowPath, extname(flowPath)), "flow");
   const inputs = Object.entries(raw.inputs ?? {}).map(([inputId, input]): FlowInput => ({
     id: inputId,
     ...(input.description !== undefined && { description: input.description }),
@@ -281,12 +290,27 @@ function resolveFlow(raw: RawFlow, flowPath: string): Flow {
     ...(input.default !== undefined && { default: input.default }),
   }));
   return {
-    id,
-    name: raw.name ?? id,
-    ...(raw.cwd !== undefined && { cwd: raw.cwd }),
-    inputs,
-    steps,
+    ok: true,
+    flow: {
+      id,
+      name: raw.name ?? id,
+      ...(raw.cwd !== undefined && { cwd: raw.cwd }),
+      inputs,
+      steps,
+    },
   };
+}
+
+/** Formats issues as the bulleted body of a {@link FlowValidationError}. */
+function formatIssues(
+  issues: readonly { message: string; path: readonly PropertyKey[] }[],
+): string {
+  return issues
+    .map((issue) => {
+      const where = issue.path.length > 0 ? ` at ${issue.path.map(String).join(".")}` : "";
+      return `  - ${issue.message}${where}`;
+    })
+    .join("\n");
 }
 
 export class FlowValidationError extends Error {}
@@ -308,16 +332,18 @@ export function parseFlow(yamlText: string, flowPath: string): Flow {
 
   const result = FlowSchema.safeParse(raw);
   if (!result.success) {
-    const issues = result.error.issues
-      .map((issue) => {
-        const where = issue.path.length > 0 ? ` at ${issue.path.join(".")}` : "";
-        return `  - ${issue.message}${where}`;
-      })
-      .join("\n");
-    throw new FlowValidationError(`Invalid flow file ${flowPath}:\n${issues}`);
+    throw new FlowValidationError(
+      `Invalid flow file ${flowPath}:\n${formatIssues(result.error.issues)}`,
+    );
   }
 
-  return resolveFlow(result.data, flowPath);
+  const resolved = resolveFlow(result.data, flowPath);
+  if (!resolved.ok) {
+    throw new FlowValidationError(
+      `Invalid flow file ${flowPath}:\n${formatIssues(resolved.issues)}`,
+    );
+  }
+  return resolved.flow;
 }
 
 /**

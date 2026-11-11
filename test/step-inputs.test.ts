@@ -88,6 +88,15 @@ test("an input with no source fails to load, naming the step and input", () => {
   }
 });
 
+test("every load-time issue is reported at once, with its path", () => {
+  const message = loadError(
+    "steps:\n  - {id: s, inputs: [x], prompt: '${{ inputs.y }}'}\n  - {id: s, prompt: p}\n",
+  );
+  assert.match(message, /step "s" input "x" has no source.* at steps\.0\.inputs\.x/);
+  assert.match(message, /unknown input "y".* at steps\.0\.prompt/);
+  assert.match(message, /duplicate step id "s".* at steps\.1\.id/);
+});
+
 test("bindings are checked in flow scope", () => {
   const yaml = (binding: string) =>
     `inputs:\n  a: {}\nsteps:\n  - id: first\n    prompt: p\n  - id: s\n    inputs: {x: '${binding}'}\n    prompt: p\n  - id: later\n    prompt: p\n`;
