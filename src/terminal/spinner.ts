@@ -1,6 +1,6 @@
 /**
- * A local replacement for `spinner()` from `@clack/prompts` (v1.9), which we
- * stopped using in "fix spinners" (6239f50). clack's spinner:
+ * A local replacement for `spinner()` from `@clack/prompts` (v1.9), whose
+ * spinner:
  * - reads the terminal width once at creation, so after the terminal narrows
  *   its erase math is wrong and stale frames pile up in scrollback;
  * - puts a TTY stdin into raw mode (via `block()`) and calls `process.exit(0)`

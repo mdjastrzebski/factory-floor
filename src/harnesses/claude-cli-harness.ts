@@ -111,8 +111,8 @@ export class ClaudeCliHarness implements Harness {
       }
       if (!(error instanceof SubprocessError)) throw error;
       // On abort, nano-spawn rejects as soon as Node reports the `AbortError`,
-      // before the SIGTERM'd child has actually exited. Wait for it, so (as
-      // before) `run` only settles once the process is gone.
+      // before the SIGTERM'd child has actually exited. Wait for it, so `run`
+      // only settles once the process is gone.
       const child = await subprocess.nodeChildProcess;
       if (child.exitCode === null && child.signalCode === null) {
         await once(child, "exit");
