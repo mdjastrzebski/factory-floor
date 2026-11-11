@@ -106,11 +106,30 @@ export function renderTemplate(template: string, vars: Record<string, string>): 
 }
 
 /**
- * Checks a template's syntax and references against the built-in variables
- * and the declared input ids. Returns one human-readable message per problem
- * (empty when the template is valid).
+ * Step ids visible to a binding (a step input's value), for checking
+ * `steps.<id>.outputs.<name>` references. `preceding` are the steps that run
+ * before the binding's step; `all` is every step in the flow.
  */
-export function checkReferences(template: string, declaredInputIds: readonly string[]): string[] {
+export interface StepScope {
+  preceding: readonly string[];
+  all: readonly string[];
+}
+
+const STEP_OUTPUT_PATTERN = /^steps\.([^.]+)\.outputs\.([^.]+)$/;
+
+/**
+ * Checks a template's syntax and references against the built-in variables
+ * and the declared input ids. With `steps`, the template is a binding
+ * evaluated in flow scope, so `steps.<id>.outputs.<name>` is also checked:
+ * unknown steps, forward references and undeclared outputs are errors (no
+ * step declares outputs yet, so every such reference is). Returns one
+ * human-readable message per problem (empty when the template is valid).
+ */
+export function checkReferences(
+  template: string,
+  declaredInputIds: readonly string[],
+  steps?: StepScope,
+): string[] {
   let segments: TemplateSegment[];
   try {
     segments = parseTemplate(template);
@@ -124,14 +143,29 @@ export function checkReferences(template: string, declaredInputIds: readonly str
   for (const segment of segments) {
     if (segment.kind !== "ref" || seen.has(segment.name)) continue;
     seen.add(segment.name);
+    const stepOutput = steps ? STEP_OUTPUT_PATTERN.exec(segment.name) : null;
     if (segment.name.startsWith("inputs.")) {
       const id = segment.name.slice("inputs.".length);
       if (!declaredInputIds.includes(id)) {
         problems.push(`unknown input "${id}" in ${segment.raw}`);
       }
+    } else if (stepOutput && steps) {
+      const [, stepId, output] = stepOutput;
+      if (!steps.all.includes(stepId)) {
+        problems.push(`unknown step "${stepId}" in ${segment.raw}`);
+      } else if (!steps.preceding.includes(stepId)) {
+        problems.push(
+          `step "${stepId}" does not run before this step, so ${segment.raw} is a forward reference`,
+        );
+      } else {
+        problems.push(`step "${stepId}" declares no output "${output}" in ${segment.raw}`);
+      }
     } else if (!builtins.includes(segment.name)) {
+      const available = steps
+        ? `inputs.<id>, steps.<id>.outputs.<name>, ${BUILTIN_VARIABLES.join(", ")}`
+        : `inputs.<id>, ${BUILTIN_VARIABLES.join(", ")}`;
       problems.push(
-        `unknown variable "${segment.name}" in ${segment.raw} (available: inputs.<id>, ${BUILTIN_VARIABLES.join(", ")})`,
+        `unknown variable "${segment.name}" in ${segment.raw} (available: ${available})`,
       );
     }
   }

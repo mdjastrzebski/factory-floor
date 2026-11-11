@@ -162,6 +162,41 @@ Input definitions:
   `default` together with `required: true` is an error. An optional input
   with no default is the empty string when not supplied.
 
+Step inputs: a step can declare its own `inputs`, so its prompt depends
+only on its own interface (see
+[ADR 01](docs/decisions/adr-01-flow-and-step-inputs-outputs.md)). A step
+without an `inputs` key sees every flow input; once it declares `inputs`,
+its prompt sees only those.
+
+```yaml
+inputs:
+  area: { default: src/ }
+
+steps:
+  - id: identify
+    inputs: [area] # list form: each bound by name to the flow input
+    prompt: Find untested behaviors in ${{ inputs.area }}.
+
+  - id: review
+    inputs:
+      area: # by name -> flow input `area`
+      where: ${{ inputs.area }}/lib # binding, evaluated in flow scope
+      depth: thorough # literal
+      tone: { default: dry } # definition: no flow input `tone`, so the default
+    prompt: Review ${{ inputs.where }} (${{ inputs.depth }}, ${{ inputs.tone }}).
+```
+
+- In the map form, a string value is a binding: a literal, or a template
+  where `inputs.<id>` is a flow input (built-ins work too). `null` or an
+  object is a definition (`description`, `required`, `default`, as for flow
+  inputs).
+- A step input resolves to its binding; else the flow input with the same
+  name; else its `default` (`""` with `required: false`). Otherwise the flow
+  fails to load, naming the step and input.
+- `${{ steps.<id>.outputs.<name> }}` in a binding is reserved for step
+  outputs, which are not implemented yet, so any such reference is a load
+  error (unknown step, forward reference, or undeclared output).
+
 `--input` rules:
 
 - The value is everything after the first `=`, so it can contain `=` and

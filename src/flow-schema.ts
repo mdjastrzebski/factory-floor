@@ -20,22 +20,6 @@ const idSchema = (what: string) =>
     );
 
 /**
- * A step as written in YAML. Like a GitHub Actions step, it has an optional
- * machine `id` and an optional human-readable `name`; at least one is
- * required. A step's identity is its `id`, or its `name` when it has none.
- */
-export const StepSchema = z
-  .object({
-    id: idSchema("step").optional(),
-    name: z.string().min(1, "step name must be a non-empty string").optional(),
-    prompt: z.string().min(1, "step prompt must be a non-empty string"),
-  })
-  .refine((step) => step.id !== undefined || step.name !== undefined, {
-    message: "step must have an id or a name",
-    path: ["name"],
-  });
-
-/**
  * An input definition as written in YAML. A `null` definition (`idea:` with
  * nothing after it) is treated as `{}`: required, no description. Inputs are
  * untyped strings, so a non-string `default` is rejected rather than coerced.
@@ -48,6 +32,57 @@ export const InputSchema = z.preprocess(
     default: z.string().optional(),
   }),
 );
+
+/**
+ * A step input in the map form of a step's `inputs`. A string is a binding
+ * (a literal, or a template evaluated in flow scope); `null` or an object is
+ * a definition like a flow input's, resolved by name.
+ */
+export const StepInputSchema = z.union([z.string(), InputSchema], {
+  error:
+    "step input must be a binding string, or a definition with description, required and default",
+});
+
+/**
+ * A step's `inputs` as written in YAML: a list of ids (each bound by name),
+ * or a map from id to a binding or definition. The list form is normalized to
+ * the map form (`[a]` is `{a: null}`), so it parses to the map form.
+ */
+export const StepInputsSchema = z.preprocess(
+  (value, ctx) => {
+    if (!Array.isArray(value)) return value;
+    const seen = new Set<unknown>();
+    for (const id of value) {
+      if (typeof id !== "string") {
+        ctx.addIssue({ code: "custom", message: "step inputs list must contain only input ids" });
+        return value;
+      }
+      if (seen.has(id)) ctx.addIssue({ code: "custom", message: `duplicate input "${id}"` });
+      seen.add(id);
+    }
+    return Object.fromEntries(value.map((id) => [id, null]));
+  },
+  z.record(z.string(), StepInputSchema, {
+    error: "step inputs must be a list of input ids or a map of input id to binding or definition",
+  }),
+);
+
+/**
+ * A step as written in YAML. Like a GitHub Actions step, it has an optional
+ * machine `id` and an optional human-readable `name`; at least one is
+ * required. A step's identity is its `id`, or its `name` when it has none.
+ */
+export const StepSchema = z
+  .object({
+    id: idSchema("step").optional(),
+    name: z.string().min(1, "step name must be a non-empty string").optional(),
+    inputs: StepInputsSchema.optional(),
+    prompt: z.string().min(1, "step prompt must be a non-empty string"),
+  })
+  .refine((step) => step.id !== undefined || step.name !== undefined, {
+    message: "step must have an id or a name",
+    path: ["name"],
+  });
 
 /**
  * A flow as written in YAML. Like a GitHub Actions workflow, `name` is the
@@ -81,8 +116,44 @@ export const FlowSchema = z
       }
     }
 
+    const stepIds = resolveStepIds(flow.steps);
     flow.steps.forEach((step, index) => {
-      for (const message of checkReferences(step.prompt, inputIds)) {
+      const scope = { preceding: stepIds.slice(0, index), all: stepIds };
+      const stepInputs = step.inputs === undefined ? undefined : Object.entries(step.inputs);
+      for (const [id, value] of stepInputs ?? []) {
+        const path = ["steps", index, "inputs", id];
+        const label = `step "${stepIds[index]}" input "${id}"`;
+        const idResult = idSchema("input").safeParse(id);
+        if (!idResult.success) {
+          ctx.addIssue({
+            code: "custom",
+            message: `${idResult.error.issues[0].message} (got "${id}")`,
+            path,
+          });
+        } else if (typeof value === "string") {
+          for (const message of checkReferences(value, inputIds, scope)) {
+            ctx.addIssue({ code: "custom", message: `${label}: ${message}`, path });
+          }
+        } else if (value.default !== undefined && value.required === true) {
+          ctx.addIssue({
+            code: "custom",
+            message: `${label} has a default, so it cannot be required: true`,
+            path: [...path, "required"],
+          });
+        } else if (
+          !inputIds.includes(id) &&
+          value.default === undefined &&
+          value.required !== false
+        ) {
+          ctx.addIssue({
+            code: "custom",
+            message: `${label} has no source: no flow input or earlier step output is named "${id}", and it has no default`,
+            path,
+          });
+        }
+      }
+      const visible = stepInputs ? stepInputs.map(([id]) => id) : inputIds;
+      for (const message of checkReferences(step.prompt, visible)) {
         ctx.addIssue({ code: "custom", message, path: ["steps", index, "prompt"] });
       }
     });
@@ -108,12 +179,35 @@ export const FlowSchema = z
 export type RawStep = z.infer<typeof StepSchema>;
 export type RawFlow = z.infer<typeof FlowSchema>;
 
+/**
+ * Where a step input's value comes from, resolved at load time (ADR 01):
+ * an explicit binding, else the flow input of the same name, else the
+ * input's default (`""` for an optional input with none).
+ */
+export type StepInputSource =
+  /** A template rendered in flow scope (flow inputs and built-ins); a literal has no references. */
+  | { kind: "binding"; template: string }
+  | { kind: "flowInput"; id: string }
+  | { kind: "value"; value: string };
+
+/** A declared step input with its source resolved. */
+export interface StepInput {
+  id: string;
+  description?: string;
+  source: StepInputSource;
+}
+
 /** A validated step with its `id` and display `name` resolved. */
 export interface Step {
   /** Slug identifier: the explicit `id`, or a unique slug of `name`. Names the step's log file. */
   id: string;
   /** Human-readable label for progress output: the explicit `name`, or `id`. */
   name: string;
+  /**
+   * The step's declared inputs, in declaration order. `undefined` when the
+   * step has no `inputs` key: its prompt then sees every flow input.
+   */
+  inputs?: StepInput[];
   prompt: string;
 }
 
@@ -138,17 +232,47 @@ export interface Flow {
   steps: Step[];
 }
 
+type RawStepInput = z.infer<typeof StepInputSchema>;
+
 /**
- * Fills in defaults: steps without an `id` get a slug of their `name`, made
- * unique against every other step's id (explicit ids are reserved first, so
- * they never get a suffix); a missing `name` falls back to the `id`.
+ * Step ids with defaults filled in: steps without an `id` get a slug of their
+ * `name`, made unique against every other step's id (explicit ids are reserved
+ * first, so they never get a suffix).
+ */
+function resolveStepIds(steps: readonly { id?: string; name?: string }[]): string[] {
+  const used = new Set(steps.flatMap((step) => (step.id ? [step.id] : [])));
+  return steps.map((step) => step.id ?? uniqueSlug(step.name ?? "", used));
+}
+
+/** Resolves one validated step input to its source; see {@link StepInputSource}. */
+function resolveStepInput(id: string, value: RawStepInput, flowInputIds: string[]): StepInput {
+  if (typeof value === "string") return { id, source: { kind: "binding", template: value } };
+  const source: StepInputSource = flowInputIds.includes(id)
+    ? { kind: "flowInput", id }
+    : { kind: "value", value: value.default ?? "" };
+  return { id, ...(value.description !== undefined && { description: value.description }), source };
+}
+
+/**
+ * Fills in defaults: step ids (see {@link resolveStepIds}); a missing `name`
+ * falls back to the `id`; step inputs are resolved to their sources.
  */
 function resolveFlow(raw: RawFlow, flowPath: string): Flow {
   const id = raw.id ?? slugify(basename(flowPath, extname(flowPath)), "flow");
-  const used = new Set(raw.steps.flatMap((step) => (step.id ? [step.id] : [])));
-  const steps = raw.steps.map((step): Step => {
-    const stepId = step.id ?? uniqueSlug(step.name!, used);
-    return { id: stepId, name: step.name ?? stepId, prompt: step.prompt };
+  const stepIds = resolveStepIds(raw.steps);
+  const flowInputIds = Object.keys(raw.inputs ?? {});
+  const steps = raw.steps.map((step, index): Step => {
+    const stepId = stepIds[index];
+    return {
+      id: stepId,
+      name: step.name ?? stepId,
+      ...(step.inputs !== undefined && {
+        inputs: Object.entries(step.inputs).map(([inputId, value]) =>
+          resolveStepInput(inputId, value, flowInputIds),
+        ),
+      }),
+      prompt: step.prompt,
+    };
   });
   const inputs = Object.entries(raw.inputs ?? {}).map(([inputId, input]): FlowInput => ({
     id: inputId,

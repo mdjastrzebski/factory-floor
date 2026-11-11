@@ -1,8 +1,8 @@
 import { mkdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { Harness, HarnessResult, ToolCall } from "./harness.ts";
-import { loadFlow, type Flow } from "./flow-schema.ts";
-import { buildVariables, renderTemplate } from "./template.ts";
+import { loadFlow, type Flow, type Step } from "./flow-schema.ts";
+import { buildVariables, renderTemplate, type VariableContext } from "./template.ts";
 
 export interface FlowStartInfo {
   id: string;
@@ -124,6 +124,27 @@ export function resolveInputs(flow: Flow, raw: string[]): Record<string, string>
 }
 
 /**
+ * The values a step's prompt sees as `inputs.<id>`: every flow input when the
+ * step declares no `inputs`, otherwise only its declared inputs, each from its
+ * load-time-resolved source. Bindings render in flow scope (`flowCtx.inputs`
+ * are the flow's inputs).
+ */
+export function resolveStepInputs(step: Step, flowCtx: VariableContext): Record<string, string> {
+  if (step.inputs === undefined) return { ...flowCtx.inputs };
+  const values: Record<string, string> = {};
+  for (const input of step.inputs) {
+    const { source } = input;
+    values[input.id] =
+      source.kind === "binding"
+        ? renderTemplate(source.template, buildVariables(flowCtx))
+        : source.kind === "flowInput"
+          ? flowCtx.inputs[source.id]
+          : source.value;
+  }
+  return values;
+}
+
+/**
  * Loads and validates the flow at `options.flowPath`, then runs its steps
  * strictly sequentially against `options.harness`, stopping immediately on
  * the first failing step. Step prompts are rendered (`${{ … }}` references)
@@ -175,9 +196,10 @@ export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
     const index = i + 1;
     const logPath = join(runDir, `${step.id}.log`);
 
+    const flowCtx = { flow, cwd, runId: timestamp, runDir, stepId: step.id, inputs };
     const prompt = renderTemplate(
       step.prompt,
-      buildVariables({ flow, cwd, runId: timestamp, runDir, stepId: step.id, inputs }),
+      buildVariables({ ...flowCtx, inputs: resolveStepInputs(step, flowCtx) }),
     );
 
     onStepStart?.({ index, total, id: step.id, name: step.name });

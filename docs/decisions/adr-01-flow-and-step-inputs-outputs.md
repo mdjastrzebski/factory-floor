@@ -14,10 +14,10 @@ flow's interface and each step's interface.
 
 ### Two scopes, same shape
 
-|          | `inputs`                                         | `outputs`                                     |
-| -------- | ------------------------------------------------ | --------------------------------------------- |
-| **Flow** | Supplied by the caller (`--input area=src/`)     | Returned by the flow (`<runDir>/outputs.json`) |
-| **Step** | Values the step's prompt needs                   | Values the step produces                      |
+|          | `inputs`                                     | `outputs`                                      |
+| -------- | -------------------------------------------- | ---------------------------------------------- |
+| **Flow** | Supplied by the caller (`--input area=src/`) | Returned by the flow (`<runDir>/outputs.json`) |
+| **Step** | Values the step's prompt needs               | Values the step produces                       |
 
 - In a **step prompt**, `${{ inputs.x }}` is that step's own input and `${{ outputs.x }}` is the
   file path where that step writes output `x`. Prompts never reference other steps or flow
