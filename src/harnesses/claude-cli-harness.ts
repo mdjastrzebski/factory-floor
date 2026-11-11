@@ -1,5 +1,6 @@
-import { once } from "node:events";
-import spawn, { SubprocessError } from "nano-spawn";
+import { spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
+import type { Readable } from "node:stream";
 import type { Harness, HarnessResult, HarnessRunOptions } from "../harness.ts";
 import { parseStreamJsonLine } from "./stream-json-parser.ts";
 
@@ -21,25 +22,9 @@ export class ClaudeCliHarness implements Harness {
   async run(options: HarnessRunOptions): Promise<HarnessResult> {
     const { cwd, prompt, onOutputChunk, onToolCall, signal } = options;
 
-    // The spawn signal is passed through to `child_process.spawn`, which sends
-    // the child SIGTERM (its default `killSignal`) when the signal aborts. It
-    // also aborts on `internalController`, used to kill the child when a
-    // callback throws: nano-spawn's iterators await the subprocess when the
-    // loop exits early, so without a kill `run` would wait for the child to
-    // exit on its own (or hang if it blocks on an undrained pipe).
-    const internalController = new AbortController();
-    const spawnSignal = signal
-      ? AbortSignal.any([signal, internalController.signal])
-      : internalController.signal;
-    const callback = <A extends unknown[]>(fn: ((...args: A) => void) | undefined, ...args: A) => {
-      try {
-        fn?.(...args);
-      } catch (error) {
-        internalController.abort();
-        throw error;
-      }
-    };
-    const subprocess = spawn(
+    // `signal` is passed through to `child_process.spawn`, which sends the
+    // child SIGTERM (its default `killSignal`) when the signal aborts.
+    const child = spawn(
       "claude",
       [
         "-p",
@@ -52,82 +37,61 @@ export class ClaudeCliHarness implements Harness {
         "stream-json",
         "--verbose",
       ],
-      { cwd, signal: spawnSignal, stdin: "ignore" },
+      { cwd, signal, stdio: ["ignore", "pipe", "pipe"] },
     );
 
-    let started = false;
-    subprocess.nodeChildProcess.then(
-      () => {
-        started = true;
-      },
-      () => {},
-    );
-
-    // nano-spawn leaves `result.stdout`/`result.stderr` empty once the line
-    // iterators are consumed, so the full text is accumulated here instead.
-    // nano-spawn's iterators split on newlines (decoding UTF-8 across chunk
-    // boundaries), so each line is re-joined with "\n".
     let stdout = "";
     let stderr = "";
     const permissionDenials: string[] = [];
 
-    const readStdout = async () => {
-      for await (const line of subprocess.stdout) {
+    // A throwing callback kills the child and is rethrown once it has exited;
+    // later lines are dropped so the callbacks aren't called again.
+    let callbackError: { error: unknown } | undefined;
+    const guarded = (handler: (line: string) => void) => (line: string) => {
+      if (callbackError) return;
+      try {
+        handler(line);
+      } catch (error) {
+        callbackError = { error };
+        child.kill();
+      }
+    };
+
+    onLines(
+      child.stdout,
+      guarded((line) => {
         stdout += `${line}\n`;
         const parsed = parseStreamJsonLine(line);
-        if (!parsed) continue;
+        if (!parsed) return;
         for (const chunk of parsed.displayChunks) {
-          callback(onOutputChunk, chunk, "stdout");
+          onOutputChunk?.(chunk, "stdout");
         }
         for (const call of parsed.toolCalls) {
-          callback(onToolCall, call);
+          onToolCall?.(call);
         }
         permissionDenials.push(...parsed.denials);
-      }
-    };
-
-    const readStderr = async () => {
-      for await (const line of subprocess.stderr) {
+      }),
+    );
+    onLines(
+      child.stderr,
+      guarded((line) => {
         stderr += `${line}\n`;
-        callback(onOutputChunk, `${line}\n`, "stderr");
-      }
-    };
+        onOutputChunk?.(`${line}\n`, "stderr");
+      }),
+    );
 
-    // Both iterators must start right away (same tick as `spawn`), or
-    // nano-spawn starts buffering that stream itself and refuses to iterate it.
-    const reading = Promise.allSettled([readStdout(), readStderr()]);
+    // 'close' fires after the process has exited and both pipes have ended,
+    // so every line has been handled by then.
+    const exitCode = await new Promise<number | null>((resolve, reject) => {
+      child.on("error", (error) => {
+        // An abort is reported as an AbortError; the run still settles on 'close'.
+        if (error.name !== "AbortError") reject(error);
+      });
+      // `code` is null when the process was killed by a signal (e.g. on abort).
+      child.on("close", (code) => resolve(code));
+    });
 
-    let exitCode: number | null = 0;
-    try {
-      await subprocess;
-    } catch (error) {
-      await reading;
-      // The process never started (e.g. `claude` not on PATH): surface the
-      // underlying spawn error, as `child_process`'s "error" event did.
-      if (!started) {
-        throw error instanceof SubprocessError && error.cause instanceof Error
-          ? error.cause
-          : error;
-      }
-      if (!(error instanceof SubprocessError)) throw error;
-      // On abort, nano-spawn rejects as soon as Node reports the `AbortError`,
-      // before the SIGTERM'd child has actually exited. Wait for it, so `run`
-      // only settles once the process is gone.
-      const child = await subprocess.nodeChildProcess;
-      if (child.exitCode === null && child.signalCode === null) {
-        await once(child, "exit");
-      }
-      // `exitCode` is undefined when the process was killed by a signal (e.g. on abort).
-      exitCode = error.exitCode ?? null;
-    }
-
-    // The iterators rethrow the subprocess's own failure (handled above);
-    // anything else (e.g. a throwing callback) is a real error.
-    for (const outcome of await reading) {
-      if (outcome.status === "rejected" && !(outcome.reason instanceof SubprocessError)) {
-        throw outcome.reason;
-      }
-    }
+    if (callbackError) throw callbackError.error;
 
     return {
       success: exitCode === 0,
@@ -137,4 +101,29 @@ export class ClaudeCliHarness implements Harness {
       permissionDenials: permissionDenials.length > 0 ? permissionDenials : undefined,
     };
   }
+}
+
+/**
+ * Calls `onLine` for each newline-terminated line of `stream` (without the
+ * "\n"), decoding UTF-8 across chunk boundaries, plus a final unterminated
+ * line if the stream ends without a trailing newline.
+ */
+function onLines(stream: Readable, onLine: (line: string) => void): void {
+  const decoder = new StringDecoder("utf8");
+  let buffered = "";
+  const emit = (text: string) => {
+    buffered += text;
+    let newline: number;
+    while ((newline = buffered.indexOf("\n")) !== -1) {
+      const line = buffered.slice(0, newline);
+      buffered = buffered.slice(newline + 1);
+      onLine(line);
+    }
+  };
+  stream.on("data", (chunk: Buffer) => emit(decoder.write(chunk)));
+  stream.on("end", () => {
+    emit(decoder.end());
+    if (buffered) onLine(buffered);
+    buffered = "";
+  });
 }

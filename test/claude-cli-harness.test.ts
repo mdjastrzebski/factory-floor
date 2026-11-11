@@ -180,3 +180,45 @@ test(
     assert.equal(isAlive(pid), false, `expected fake claude (pid ${pid}) to have been killed`);
   },
 );
+
+test("ClaudeCliHarness forwards stderr, handles a final line without a trailing newline and reports a non-zero exit", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "factory-floor-fake-claude-"));
+  const text = JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "text", text: "partial" }] },
+  });
+  const script = `#!/usr/bin/env node
+process.stderr.write("oops\\n");
+process.stdout.write(${JSON.stringify(text)}, () => process.exit(3));
+`;
+  writeFileSync(join(dir, "claude"), script, "utf8");
+  chmodSync(join(dir, "claude"), 0o755);
+
+  const harness = new ClaudeCliHarness();
+  const chunks: [string, string][] = [];
+
+  const originalPath = process.env.PATH ?? "";
+  process.env.PATH = `${dir}:${originalPath}`;
+  let result;
+  try {
+    result = await harness.run({
+      cwd: dir,
+      prompt: "irrelevant",
+      onOutputChunk: (chunk, stream) => chunks.push([stream, chunk]),
+    });
+  } finally {
+    process.env.PATH = originalPath;
+  }
+
+  assert.equal(result.success, false);
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.stdout, `${text}\n`);
+  assert.equal(result.stderr, "oops\n");
+  assert.deepEqual(
+    chunks.toSorted(([a], [b]) => a.localeCompare(b)),
+    [
+      ["stderr", "oops\n"],
+      ["stdout", "partial"],
+    ],
+  );
+});
