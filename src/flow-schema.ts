@@ -99,7 +99,6 @@ export const FlowSchema = z.object({
   steps: z.array(StepSchema).min(1, "flow must have at least one step"),
 });
 
-export type RawStep = z.infer<typeof StepSchema>;
 export type RawFlow = z.infer<typeof FlowSchema>;
 
 /**
