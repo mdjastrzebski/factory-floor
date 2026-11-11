@@ -49,9 +49,10 @@ export function parseStreamJsonLine(line: string): ParsedStreamJsonLine | undefi
       if (b.type === "text" && typeof b.text === "string") {
         displayChunks.push(b.text);
       } else if (b.type === "tool_use" && typeof b.name === "string") {
-        displayChunks.push(`\n→ ${b.name}\n`);
         const detail = toolCallDetail(b.input);
-        toolCalls.push(detail === undefined ? { name: b.name } : { name: b.name, detail });
+        displayChunks.push(`\n→ ${b.name}${detail ? ` ${detail.split("\n")[0].trim()}` : ""}\n`);
+        const activity = TOOL_ACTIVITY[b.name];
+        toolCalls.push({ name: b.name, ...(detail !== undefined && { detail }), ...(activity && { activity }) });
       }
     }
   } else if (e.type === "result") {
@@ -65,6 +66,26 @@ export function parseStreamJsonLine(line: string): ParsedStreamJsonLine | undefi
 
   return { displayChunks, toolCalls, denials };
 }
+
+/**
+ * Generic, human-readable description of what each of Claude Code's own
+ * tools does, for display where exact arguments (an arbitrary file path or
+ * shell command) would be noise. Specific to Claude Code's tool vocabulary -
+ * another harness would define its own.
+ */
+const TOOL_ACTIVITY: Record<string, string> = {
+  Bash: "Running command",
+  Read: "Reading file",
+  Write: "Writing file",
+  Edit: "Editing file",
+  MultiEdit: "Editing file",
+  Grep: "Searching",
+  Glob: "Finding files",
+  WebFetch: "Fetching URL",
+  WebSearch: "Searching the web",
+  Task: "Running subtask",
+  TodoWrite: "Updating todos",
+};
 
 /** Input fields checked, in order, for a tool call's primary argument. */
 const DETAIL_FIELDS = ["file_path", "notebook_path", "command", "pattern", "path", "url"] as const;

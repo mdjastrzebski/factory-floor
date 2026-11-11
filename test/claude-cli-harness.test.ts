@@ -128,7 +128,7 @@ test("ClaudeCliHarness kills the subprocess when the signal aborts and reports t
 
   assert.equal(result.success, false);
   assert.equal(result.exitCode, null);
-  assert.deepEqual(toolCalls, [{ name: "Edit", detail: "src/a.ts" }]);
+  assert.deepEqual(toolCalls, [{ name: "Edit", detail: "src/a.ts", activity: "Editing file" }]);
   assert.ok(result.stdout.includes('"tool_use"'), `unexpected stdout: ${result.stdout}`);
   assert.equal(result.stderr, "working\n");
 

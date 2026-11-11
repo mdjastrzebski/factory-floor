@@ -39,7 +39,7 @@ test("parseStreamJsonLine renders tool_use blocks as an arrow line", () => {
   const result = parseStreamJsonLine(line);
   assert.deepEqual(result, {
     displayChunks: ["\n→ Bash\n"],
-    toolCalls: [{ name: "Bash" }],
+    toolCalls: [{ name: "Bash", activity: "Running command" }],
     denials: [],
   });
 });
@@ -58,7 +58,7 @@ test("parseStreamJsonLine handles multiple content blocks in order", () => {
   const result = parseStreamJsonLine(line);
   assert.deepEqual(result, {
     displayChunks: ["doing a thing", "\n→ Edit\n", "done"],
-    toolCalls: [{ name: "Edit" }],
+    toolCalls: [{ name: "Edit", activity: "Editing file" }],
     denials: [],
   });
 });
@@ -106,17 +106,17 @@ test("parseStreamJsonLine exposes tool_use blocks as structured tool calls with 
   });
   const result = parseStreamJsonLine(line);
   assert.deepEqual(result?.toolCalls, [
-    { name: "Edit", detail: "src/foo.ts" },
-    { name: "Bash", detail: "npm test" },
-    { name: "Grep", detail: "TODO" },
-    { name: "TodoWrite" },
+    { name: "Edit", detail: "src/foo.ts", activity: "Editing file" },
+    { name: "Bash", detail: "npm test", activity: "Running command" },
+    { name: "Grep", detail: "TODO", activity: "Searching" },
+    { name: "TodoWrite", activity: "Updating todos" },
   ]);
-  // The rendered display text is unchanged by the structured field.
+  // The display text includes the detail, for verbose mode.
   assert.deepEqual(result?.displayChunks, [
-    "\n→ Edit\n",
+    "\n→ Edit src/foo.ts\n",
     "now testing",
-    "\n→ Bash\n",
-    "\n→ Grep\n",
+    "\n→ Bash npm test\n",
+    "\n→ Grep TODO\n",
     "\n→ TodoWrite\n",
   ]);
 });
@@ -134,10 +134,10 @@ test("parseStreamJsonLine omits a tool call's detail when its input is missing o
     },
   });
   assert.deepEqual(parseStreamJsonLine(line)?.toolCalls, [
-    { name: "Read" },
-    { name: "Read" },
-    { name: "Read" },
-    { name: "Read" },
+    { name: "Read", activity: "Reading file" },
+    { name: "Read", activity: "Reading file" },
+    { name: "Read", activity: "Reading file" },
+    { name: "Read", activity: "Reading file" },
   ]);
 });
 

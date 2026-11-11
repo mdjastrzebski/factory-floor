@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { isAbsolute, relative } from "node:path";
+import { relative } from "node:path";
 import { Command } from "commander";
 import { intro, log, outro } from "@clack/prompts";
 import pc from "picocolors";
@@ -20,6 +20,8 @@ interface ActiveStep {
   /** `[i/total] <step name>`, the spinner's base text. */
   label: string;
   spinner: Spinner;
+  /** Tool calls seen so far this step, for the running count in the spinner. */
+  toolCallCount: number;
 }
 
 function formatDuration(ms: number): string {
@@ -32,24 +34,37 @@ function displayPath(path: string): string {
   return rel.startsWith("..") ? path : rel;
 }
 
-/** Like {@link displayPath}, but leaves non-path strings (commands, URLs, patterns) untouched. */
-function displayPathIfAbsolute(text: string): string {
-  return isAbsolute(text) ? displayPath(text) : text;
+/** Max length of the detail excerpt shown in the spinner, in characters. */
+const DETAIL_EXCERPT_LENGTH = 50;
+
+/**
+ * A short, generic excerpt of a tool call's detail, safe to show regardless
+ * of what produced it (a file path, a shell command, a search pattern, ...).
+ * Collapses whitespace, drops a leading shell `cd <dir>;`/`&&` prefix (rarely
+ * meaningful to a reader - the step's cwd is already implied), and truncates
+ * to a fixed length so one long detail can't dominate the line.
+ */
+function detailExcerpt(detail: string): string {
+  const collapsed = detail.replace(/\s+/g, " ").trim();
+  const withoutCd = collapsed.replace(/^cd\s+\S+\s*(?:;|&&)\s*/, "");
+  if (withoutCd.length <= DETAIL_EXCERPT_LENGTH) return withoutCd;
+  return `${withoutCd.slice(0, DETAIL_EXCERPT_LENGTH - 1)}…`;
 }
 
 /**
- * `[i/total] <step name> → <tool> <detail>`. The spinner truncates it to the
- * terminal width; control characters (tabs, escapes) are blanked so they
- * can't throw off its width math.
+ * `[i/total] <step name> → <generic activity>: <short detail excerpt> (#<n>)`.
+ * Leads with what kind of thing the tool is doing (the harness's own
+ * `activity` label, not its exact arguments - those vary wildly in length
+ * and can be noisy, e.g. a chained shell command), then a bounded excerpt of
+ * the actual argument, then a running count of tool calls this step so a
+ * long, repetitive step (many edits, many searches) still reads as progress.
+ * Pass `--verbose` to see exact, untruncated commands/paths/patterns.
  */
-function toolCallMessage(label: string, call: ToolCall): string {
-  const rawDetail = call.detail?.split("\n")[0].trim();
-  const detail = rawDetail && displayPathIfAbsolute(rawDetail);
-  const activity = (detail ? `${call.name} ${detail}` : call.name).replace(
-    new RegExp(String.raw`[\x00-\x1f\x7f-\x9f]`, "g"),
-    " ",
-  );
-  return `${label} ${pc.dim(`→ ${activity}`)}`;
+function toolCallMessage(label: string, call: ToolCall, count: number): string {
+  const activity = call.activity ?? call.name;
+  const excerpt = call.detail && detailExcerpt(call.detail);
+  const detailSuffix = excerpt ? `: ${excerpt}` : "";
+  return `${label} ${pc.dim(`→ ${activity}${detailSuffix} (#${count})`)}`;
 }
 
 async function runCommand(flowPath: string, { verbose }: { verbose: boolean }): Promise<void> {
@@ -90,13 +105,14 @@ async function runCommand(flowPath: string, { verbose }: { verbose: boolean }): 
         }
         const s = createSpinner();
         s.start(label);
-        active = { name, label, spinner: s };
+        active = { name, label, spinner: s, toolCallCount: 0 };
       },
       onToolCall: verbose
         ? undefined
         : (stepName, call) => {
             if (active?.name === stepName) {
-              active.spinner.message(toolCallMessage(active.label, call));
+              active.toolCallCount++;
+              active.spinner.message(toolCallMessage(active.label, call, active.toolCallCount));
             }
           },
       onWarning: (stepName, message) => {

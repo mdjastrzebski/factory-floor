@@ -26,6 +26,14 @@ export interface ToolCall {
   name: string;
   /** The tool's primary argument when trivially available (e.g. a file path or command). */
   detail?: string;
+  /**
+   * Generic, human-readable description of what the tool does (e.g. "Running
+   * command" for `Bash`), for display where exact arguments would be noise.
+   * Each harness knows its own tool vocabulary and fills this in; callers
+   * that don't care about a specific harness should prefer this over `name`.
+   * Falls back to `name` when a harness has no label for the tool.
+   */
+  activity?: string;
 }
 
 export interface HarnessRunOptions {
