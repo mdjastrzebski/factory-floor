@@ -4,6 +4,7 @@ import {
   BUILTIN_VARIABLES,
   TemplateSyntaxError,
   buildVariables,
+  checkDefaultReferences,
   checkReferences,
   parseTemplate,
   renderTemplate,
@@ -129,8 +130,20 @@ test("buildVariables supplies every built-in and input that checkReferences acce
     runId: "r1",
     runDir: "/cwd/runs/r1",
     stepId: "s1",
+    gitBranch: "feat/x",
     inputs: { a: "A" },
   });
   assert.deepEqual(Object.keys(vars).sort(), [...BUILTIN_VARIABLES, "inputs.a"].sort());
-  assert.equal(renderTemplate(text, vars), "f F /cwd r1 /cwd/runs/r1 s1 A");
+  assert.equal(renderTemplate(text, vars), "f F /cwd r1 /cwd/runs/r1 s1 feat/x A");
+});
+
+test("checkDefaultReferences allows built-ins except step.id, and no inputs", () => {
+  assert.deepEqual(checkDefaultReferences("${{ git.branch }}-${{ flow.id }} ${{ run.id }}"), []);
+  assert.deepEqual(checkDefaultReferences("plain"), []);
+  for (const ref of ["step.id", "inputs.a", "env.HOME"]) {
+    const [message, ...rest] = checkDefaultReferences(`\${{ ${ref} }}`);
+    assert.equal(rest.length, 0);
+    assert.ok(message.startsWith(`\${{ ${ref} }} is not available in a default`), message);
+  }
+  assert.equal(checkDefaultReferences("${{ git.branch").length, 1);
 });

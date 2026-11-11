@@ -1,0 +1,81 @@
+# Open a GitHub PR for a branch (by default the one checked out), with a title that says what the
+# change is for and a description that helps a reviewer get oriented. It
+# only describes the change; reviewing it is a separate flow.
+#
+# Requires the `gh` CLI, authenticated for the repo's GitHub remote.
+#
+# `cwd: ..` points at the repo root, since this file lives in flows/.
+id: create-pr
+name: Create PR
+cwd: ..
+inputs:
+  branch:
+    description: Branch to open the PR from
+    default: ${{ git.branch }}
+  base:
+    description: Branch to open the PR against; empty means the repo's default branch
+    required: false
+  draft:
+    description: '"true" to open the PR as a draft'
+    default: "false"
+
+steps:
+  - id: describe-change
+    name: Describe the change
+    inputs: [branch, base]
+    prompt: |
+      Write a pull request title and description for branch
+      "${{ inputs.branch }}". Do not change any code, commit, or push in
+      this step.
+
+      Base branch: "${{ inputs.base }}". If that is empty, use the repo's
+      default branch (`gh repo view --json defaultBranchRef`, or
+      origin/HEAD). The change is everything since the merge base with the
+      base branch: read `git log <base>..${{ inputs.branch }}` and
+      `git diff <base>...${{ inputs.branch }}`, then read the surrounding
+      code wherever the diff alone does not explain why something changed.
+      Only committed changes count: if there are uncommitted changes,
+      ignore them and mention that in your final message.
+
+      Title: one line, under ~70 characters, saying what the change does
+      and why it exists, not how. If the repo's commit history follows a
+      convention (e.g. Conventional Commits like `feat:` / `fix:`), use it.
+
+      Description, in Markdown, short and skimmable, with these sections
+      (drop any that would be empty):
+      - Summary: 1-3 sentences on what changes and the motivation.
+      - Changes: the notable changes, grouped by area or concern, not a
+        file-by-file or commit-by-commit list.
+      - Review notes: what a reviewer should know to review well: where to
+        start reading, design decisions and trade-offs, behavior or API
+        changes, breaking changes or migrations, new dependencies, and
+        anything risky or deliberately left out.
+      - Testing: tests added or changed, and how to verify the change by
+        hand if that's not obvious.
+      Link a related issue if the branch name, commits or code reference
+      one. Describe only what the code shows; do not invent motivation, and
+      do not review the change (no judgements, bugs, or suggestions).
+
+      Write the title as the first line of ${{ run.dir }}/pr.md, then a
+      blank line, then the description.
+
+  - id: open-pr
+    name: Open the PR
+    prompt: |
+      Open a GitHub pull request from branch "${{ inputs.branch }}" using
+      the title and description in ${{ run.dir }}/pr.md (first line is the
+      title, the rest after the blank line is the body). Do not change any
+      code.
+
+      1. Use base branch "${{ inputs.base }}", or the repo's default branch
+         if that is empty.
+      2. If "${{ inputs.branch }}" is the base branch, stop and report that
+         there is nothing to open a PR from.
+      3. Push "${{ inputs.branch }}" to origin (set upstream if needed).
+         Never force-push.
+      4. If a PR already exists for this branch, update its title and body
+         with `gh pr edit` instead of creating a new one. Otherwise create
+         it with `gh pr create --head ${{ inputs.branch }} --base <base>
+         --title <title> --body-file <file with the body>`, adding
+         `--draft` if "${{ inputs.draft }}" is "true".
+      5. Finish by printing the PR URL.

@@ -14,6 +14,8 @@ export interface VariableContext {
   runId: string;
   runDir: string;
   stepId: string;
+  /** Branch checked out in `cwd` at run start; `""` if detached or not a git repo. */
+  gitBranch: string;
   /** Resolved input values keyed by input id. */
   inputs: Readonly<Record<string, string>>;
 }
@@ -29,6 +31,7 @@ const BUILTINS = {
   "run.id": (ctx) => ctx.runId,
   "run.dir": (ctx) => ctx.runDir,
   "step.id": (ctx) => ctx.stepId,
+  "git.branch": (ctx) => ctx.gitBranch,
 } satisfies Record<string, (ctx: VariableContext) => string>;
 
 /** Built-in variables available in every step prompt, in addition to `inputs.<id>`. */
@@ -175,6 +178,36 @@ export function checkReferences(
         : `inputs.<id>, ${BUILTIN_VARIABLES.join(", ")}`;
       problems.push(
         `unknown variable "${segment.name}" in ${segment.raw} (available: ${available})`,
+      );
+    }
+  }
+  return problems;
+}
+
+/**
+ * Built-ins available in a flow input's `default`, which is rendered at run
+ * start, before any step: everything but `step.id`. Inputs are not available.
+ */
+export const DEFAULT_VARIABLES = BUILTIN_VARIABLES.filter((name) => name !== "step.id");
+
+/**
+ * Checks a flow input `default` template: syntax, and that it references
+ * only {@link DEFAULT_VARIABLES}. Returns one message per problem.
+ */
+export function checkDefaultReferences(template: string): string[] {
+  let segments: TemplateSegment[];
+  try {
+    segments = parseTemplate(template);
+  } catch (error) {
+    if (error instanceof TemplateSyntaxError) return [error.message];
+    throw error;
+  }
+  const allowed: readonly string[] = DEFAULT_VARIABLES;
+  const problems: string[] = [];
+  for (const segment of segments) {
+    if (segment.kind === "ref" && !allowed.includes(segment.name)) {
+      problems.push(
+        `${segment.raw} is not available in a default (available: ${DEFAULT_VARIABLES.join(", ")})`,
       );
     }
   }

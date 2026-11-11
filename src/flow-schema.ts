@@ -3,7 +3,7 @@ import { basename, extname } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { slugify, uniqueSlug } from "./slug.ts";
-import { checkReferences } from "./template.ts";
+import { checkDefaultReferences, checkReferences } from "./template.ts";
 
 /**
  * Identifier format for flow and step `id`s, modelled on GitHub Actions step
@@ -140,6 +140,7 @@ export interface FlowInput {
   description?: string;
   /** Effective requiredness: false when a `default` exists, else `required` (default true). */
   required: boolean;
+  /** May contain `${{ … }}` built-in references, rendered at run start. */
   default?: string;
 }
 
@@ -214,6 +215,11 @@ function resolveFlow(
         message: `input "${id}" has a default, so it cannot be required: true`,
         path: ["inputs", id, "required"],
       });
+    }
+    if (input.default !== undefined) {
+      for (const message of checkDefaultReferences(input.default)) {
+        issues.push({ message: `input "${id}": ${message}`, path: ["inputs", id, "default"] });
+      }
     }
   }
 

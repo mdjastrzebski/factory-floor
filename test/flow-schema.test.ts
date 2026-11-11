@@ -331,6 +331,21 @@ test("inputs: default with required: false is fine", () => {
   assert.deepEqual(flow.inputs, [{ id: "b", required: false, default: "x" }]);
 });
 
+test("inputs: a default may reference built-ins but not step.id or inputs", () => {
+  const flow = parseFlow(
+    'inputs:\n  b: {default: "${{ git.branch }}"}\nsteps:\n  - {name: a, prompt: p}\n',
+    "flow.yaml",
+  );
+  assert.deepEqual(flow.inputs, [{ id: "b", required: false, default: "${{ git.branch }}" }]);
+
+  const message = loadError(
+    'inputs:\n  a: {}\n  b: {default: "${{ step.id }}/${{ inputs.a }}"}\nsteps:\n  - {name: a, prompt: p}\n',
+  );
+  assert.match(message, /input "b": \$\{\{ step\.id \}\} is not available in a default/);
+  assert.match(message, /input "b": \$\{\{ inputs\.a \}\} is not available in a default/);
+  assert.match(message, /at inputs\.b\.default/);
+});
+
 test("inputs: a bad input id names the key", () => {
   const message = loadError("inputs:\n  Bad Id: {}\nsteps:\n  - {name: a, prompt: p}\n");
   assert.match(message, /input id must start with a lowercase letter/);

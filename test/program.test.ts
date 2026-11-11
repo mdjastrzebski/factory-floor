@@ -161,3 +161,30 @@ test("a bad --input sets a non-zero exit code and never calls the harness", asyn
     assert.equal(proc.exitCode, 1, args.join(" "));
   }
 });
+
+test("inputs missing from --input are prompted for, unless --yes", async () => {
+  const flowPath = writeFlow(INPUT_FLOW);
+  for (const [args, expected, expectedAsked] of [
+    [[], "do typed on main! in spec", ["idea", "branch"]],
+    [["--input", "idea=x"], "do x on main! in spec", ["branch"]],
+    [["--yes", "--input", "idea=x"], "do x on main in spec", []],
+  ] as const) {
+    const proc = new FakeProcess();
+    const prompts: string[] = [];
+    const asked: string[] = [];
+
+    await buildProgram({
+      createHarness: () => promptRecorder(prompts),
+      proc,
+      createReporter: () => recordingReporter([]),
+      promptInput: async (input) => {
+        asked.push(input.id);
+        return input.id === "idea" ? "typed" : `${input.default}!`;
+      },
+    }).parseAsync(["run", flowPath, ...args], { from: "user" });
+
+    assert.deepEqual(prompts, [expected], args.join(" "));
+    assert.deepEqual(asked, expectedAsked, args.join(" "));
+    assert.equal(proc.exitCode, 0, args.join(" "));
+  }
+});

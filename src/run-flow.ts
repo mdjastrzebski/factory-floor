@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { Harness, HarnessResult, ToolCall } from "./harness.ts";
@@ -45,6 +46,13 @@ export interface RunFlowOptions {
   harness: Harness;
   /** Raw `key=value` flow inputs from the CLI (`--input`), in order; parsed and validated by {@link resolveInputs}. */
   inputs?: string[];
+  /**
+   * Asks for the value of each declared input not supplied in `inputs`, in
+   * declaration order, before any step runs; the answer counts as supplied.
+   * Without it, unsupplied inputs take their default (the CLI omits it when
+   * stdin is not a TTY, or with `--yes`).
+   */
+  promptInput?: (input: InputPrompt) => Promise<string>;
   /** Called once the flow file is loaded and validated, before any step runs. */
   onFlowStart?: (info: FlowStartInfo) => void;
   /** Called right before a step starts. */
@@ -79,15 +87,23 @@ export interface RunFlowResult {
 /** Thrown for run-time problems that aren't flow-schema validation errors (e.g. a missing `cwd`). */
 export class FlowRunError extends Error {}
 
+/** An input the caller did not supply with `--input`, handed to {@link RunFlowOptions.promptInput}. */
+export interface InputPrompt {
+  id: string;
+  description?: string;
+  /** Whether the input has no default and is not `required: false`. */
+  required: boolean;
+  /** The rendered default (built-ins such as `git.branch` substituted); `""` when there is none. */
+  default: string;
+}
+
 /**
  * Parses raw `key=value` strings (the value is everything after the first
- * `=`, so it may contain `=` and newlines) and resolves them against the
- * flow's declared inputs: supplied value, else default, else `""` for an
- * optional input. Keys are in declaration order. Throws {@link FlowRunError}
- * for a malformed or duplicate `--input`, an undeclared input, or any
- * required input that was not supplied (all missing ones are listed).
+ * `=`, so it may contain `=` and newlines) into supplied values keyed by
+ * input id. Throws {@link FlowRunError} for a malformed or duplicate
+ * `--input`, or an input the flow does not declare.
  */
-export function resolveInputs(flow: Flow, raw: string[]): Record<string, string> {
+function parseInputArgs(flow: Flow, raw: string[]): Map<string, string> {
   const declared = new Set(flow.inputs.map((input) => input.id));
   const supplied = new Map<string, string>();
   for (const entry of raw) {
@@ -108,7 +124,19 @@ export function resolveInputs(flow: Flow, raw: string[]): Record<string, string>
     }
     supplied.set(key, entry.slice(eq + 1));
   }
+  return supplied;
+}
 
+/**
+ * Resolves each declared input, in declaration order: supplied value, else
+ * its default from `defaults`, else `""` for an optional input. Throws
+ * {@link FlowRunError} listing every required input that was not supplied.
+ */
+function finalizeInputs(
+  flow: Flow,
+  supplied: ReadonlyMap<string, string>,
+  defaults: Readonly<Record<string, string>>,
+): Record<string, string> {
   const missing = flow.inputs.filter((input) => input.required && !supplied.has(input.id));
   if (missing.length > 0) {
     throw new FlowRunError(
@@ -118,9 +146,44 @@ export function resolveInputs(flow: Flow, raw: string[]): Record<string, string>
 
   const resolved: Record<string, string> = {};
   for (const input of flow.inputs) {
-    resolved[input.id] = supplied.get(input.id) ?? input.default ?? "";
+    resolved[input.id] = supplied.get(input.id) ?? defaults[input.id] ?? "";
   }
   return resolved;
+}
+
+/**
+ * Parses raw `--input` strings and resolves them against the flow's declared
+ * inputs (see {@link parseInputArgs} and {@link finalizeInputs}). `defaults`
+ * are the rendered defaults keyed by input id; they default to the flow's
+ * `default` strings as written.
+ */
+export function resolveInputs(
+  flow: Flow,
+  raw: string[],
+  defaults: Readonly<Record<string, string>> = rawDefaults(flow),
+): Record<string, string> {
+  return finalizeInputs(flow, parseInputArgs(flow, raw), defaults);
+}
+
+function rawDefaults(flow: Flow): Record<string, string> {
+  return Object.fromEntries(
+    flow.inputs.flatMap((input) =>
+      input.default !== undefined ? [[input.id, input.default]] : [],
+    ),
+  );
+}
+
+/** The branch checked out in `cwd`, or `""` when detached, not a git repo, or git is missing. */
+function currentGitBranch(cwd: string): string {
+  try {
+    return execFileSync("git", ["branch", "--show-current"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return "";
+  }
 }
 
 /**
@@ -158,6 +221,7 @@ export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
     verbose,
     harness,
     inputs: rawInputs = [],
+    promptInput,
     onFlowStart,
     onStepStart,
     onStepComplete,
@@ -168,7 +232,7 @@ export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
   } = options;
 
   const flow = loadFlow(flowPath);
-  const inputs = resolveInputs(flow, rawInputs);
+  const supplied = parseInputArgs(flow, rawInputs);
 
   const flowDir = dirname(resolve(flowPath));
   const cwd = flow.cwd ? (isAbsolute(flow.cwd) ? flow.cwd : resolve(flowDir, flow.cwd)) : flowDir;
@@ -185,6 +249,31 @@ export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const runDir = join(cwd, ".factory-floor", "runs", timestamp);
+  const runCtx = { flow, cwd, runId: timestamp, runDir, gitBranch: currentGitBranch(cwd) };
+
+  const defaultVars = buildVariables({ ...runCtx, stepId: "", inputs: {} });
+  const defaults: Record<string, string> = {};
+  for (const input of flow.inputs) {
+    if (input.default !== undefined) {
+      defaults[input.id] = renderTemplate(input.default, defaultVars);
+    }
+  }
+  if (promptInput) {
+    for (const input of flow.inputs) {
+      if (supplied.has(input.id)) continue;
+      supplied.set(
+        input.id,
+        await promptInput({
+          id: input.id,
+          ...(input.description !== undefined && { description: input.description }),
+          required: input.required,
+          default: defaults[input.id] ?? "",
+        }),
+      );
+    }
+  }
+  const inputs = finalizeInputs(flow, supplied, defaults);
+
   mkdirSync(runDir, { recursive: true });
   writeFileSync(join(runDir, "inputs.json"), `${JSON.stringify(inputs, null, 2)}\n`, "utf8");
 
@@ -196,7 +285,7 @@ export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
     const index = i + 1;
     const logPath = join(runDir, `${step.id}.log`);
 
-    const flowCtx = { flow, cwd, runId: timestamp, runDir, stepId: step.id, inputs };
+    const flowCtx = { ...runCtx, stepId: step.id, inputs };
     const prompt = renderTemplate(
       step.prompt,
       buildVariables({ ...flowCtx, inputs: resolveStepInputs(step, flowCtx) }),

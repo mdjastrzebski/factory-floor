@@ -1,9 +1,9 @@
 import { readFileSync } from "node:fs";
 import { Command } from "commander";
-import { intro, log, outro } from "@clack/prompts";
+import { intro, isCancel, log, outro, text } from "@clack/prompts";
 import pc from "picocolors";
 import type { Harness } from "./harness.ts";
-import { runFlow } from "./run-flow.ts";
+import { FlowRunError, runFlow, type InputPrompt } from "./run-flow.ts";
 import { createFlowReporter, type FlowReporter } from "./terminal/flow-reporter.ts";
 import { createSpinner } from "./terminal/spinner.ts";
 import { createVerboseOutputFormatter } from "./terminal/verbose-output.ts";
@@ -28,15 +28,39 @@ export interface CliDeps {
   proc: CliProcess;
   /** Defaults to the clack-backed `createFlowReporter`. */
   createReporter?: (verbose: boolean) => FlowReporter;
+  /**
+   * Asks for an input not given with `--input`. Defaults to a clack text
+   * prompt pre-filled with the default when stdin is a TTY, and to none
+   * (defaults are used as-is) otherwise. Never used with `--yes`.
+   */
+  promptInput?: (input: InputPrompt) => Promise<string>;
+}
+
+async function clackPromptInput(input: InputPrompt): Promise<string> {
+  const description = input.description ? ` ${pc.dim(input.description)}` : "";
+  const value = await text({
+    message: `${pc.bold(input.id)}${description}`,
+    initialValue: input.default,
+    defaultValue: input.default,
+    validate: (value) => (input.required && !value ? `"${input.id}" is required` : undefined),
+  });
+  if (isCancel(value)) throw new FlowRunError("Cancelled");
+  return value;
 }
 
 const defaultReporter = (verbose: boolean): FlowReporter =>
   createFlowReporter({ verbose, print: console, log, outro, createSpinner });
 
+interface RunOptions {
+  verbose: boolean;
+  input: string[];
+  yes: boolean;
+}
+
 async function runCommand(
   deps: CliDeps,
   flowPath: string,
-  { verbose, input }: { verbose: boolean; input: string[] },
+  { verbose, input, yes }: RunOptions,
 ): Promise<void> {
   const { proc } = deps;
   intro(`${pc.bold(pc.cyan("factory-floor"))} ${pc.dim(flowPath)}`);
@@ -59,6 +83,9 @@ async function runCommand(
       verbose,
       harness,
       inputs: input,
+      promptInput: yes
+        ? undefined
+        : (deps.promptInput ?? (process.stdin.isTTY ? clackPromptInput : undefined)),
       signal: controller.signal,
       onFlowStart: reporter.onFlowStart,
       onStepStart: reporter.onStepStart,
@@ -100,7 +127,8 @@ export function buildProgram(deps: CliDeps): Command {
       (value: string, previous: string[]) => [...previous, value],
       [] as string[],
     )
-    .action(async (flowPath: string, options: { verbose: boolean; input: string[] }) => {
+    .option("-y, --yes", "don't ask for inputs missing from --input; use their defaults", false)
+    .action(async (flowPath: string, options: RunOptions) => {
       await runCommand(deps, flowPath, options);
     });
 

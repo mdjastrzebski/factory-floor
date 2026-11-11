@@ -102,6 +102,7 @@ defined or run.
 factory-floor run <flow.yaml>
 factory-floor run <flow.yaml> --verbose
 factory-floor run <flow.yaml> --input key=value --input other=value
+factory-floor run <flow.yaml> --yes   # don't ask for missing inputs
 ```
 
 Default output is one terse line per step:
@@ -161,6 +162,16 @@ Input definitions:
 - An input is required unless it has a `default` or says `required: false`.
   `default` together with `required: true` is an error. An optional input
   with no default is the empty string when not supplied.
+- A `default` may reference built-in variables, rendered at run start
+  (`default: ${{ git.branch }}` defaults to the checked-out branch). Every
+  built-in except `step.id` is allowed; `inputs.<id>` is not.
+
+When stdin is a terminal, `factory-floor run` asks for each declared input
+not given with `--input`, in declaration order, with its (rendered) default
+pre-filled: press Enter to accept it or edit it first. A required input with
+no default must be non-empty. Pass `--yes` (`-y`) to skip the questions and
+use the defaults; when stdin is not a terminal (CI, pipes) nothing is asked
+and the defaults are used, so missing required inputs are an error.
 
 Step inputs: a step can declare its own `inputs`, so its prompt depends
 only on its own interface (see
@@ -224,6 +235,7 @@ are no defaults, filters or expressions. Templates apply to step
 | `run.id`               | this run's timestamp id (the `<ISO-timestamp>` directory name)                 |
 | `run.dir`              | absolute `<cwd>/.factory-floor/runs/<run.id>`, where logs and `inputs.json` go |
 | `step.id`              | the current step's id                                                          |
+| `git.branch`           | the branch checked out in `cwd` at run start; `""` if detached or not a repo   |
 
 Validation happens before any agent process starts. At flow load time (an
 `Invalid flow file` error listing every problem with its location, such as

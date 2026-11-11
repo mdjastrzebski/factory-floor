@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { execFileSync } from "node:child_process";
 import type { Harness, HarnessResult, HarnessRunOptions } from "../src/harness.ts";
 import { FlowValidationError, parseFlow } from "../src/flow-schema.ts";
 import { FlowRunError, resolveInputs, runFlow } from "../src/run-flow.ts";
@@ -206,4 +207,48 @@ test("resolveInputs is pure: resolves values against a parsed flow", () => {
   assert.deepEqual(resolveInputs(flow, ["a=1"]), { a: "1", b: "d", c: "" });
   assert.deepEqual(resolveInputs(flow, ["c=x=y", "a=", "b=z"]), { a: "", b: "z", c: "x=y" });
   assert.throws(() => resolveInputs(flow, []), FlowRunError);
+});
+
+const PROMPT_FLOW = `
+inputs:
+  idea: {}
+  branch: {default: "\${{ git.branch }}"}
+  note: {required: false}
+steps:
+  - id: s
+    prompt: "\${{ inputs.idea }}|\${{ inputs.branch }}|\${{ inputs.note }}"
+`;
+
+test("a default can reference git.branch: the branch checked out in cwd", async () => {
+  const { dir, flowPath, harness } = setup(PROMPT_FLOW);
+  execFileSync("git", ["init", "-q", "-b", "feat/demo"], { cwd: dir });
+  await runFlow({ flowPath, verbose: false, harness, inputs: ["idea=x"] });
+  assert.equal(harness.calls[0].prompt, "x|feat/demo|");
+});
+
+test("git.branch is empty outside a git repo", async () => {
+  const { flowPath, harness } = setup(PROMPT_FLOW);
+  await runFlow({ flowPath, verbose: false, harness, inputs: ["idea=x"] });
+  assert.equal(harness.calls[0].prompt, "x||");
+});
+
+test("promptInput asks for each unsupplied input in order, with its rendered default", async () => {
+  const { dir, flowPath, harness } = setup(PROMPT_FLOW);
+  execFileSync("git", ["init", "-q", "-b", "feat/demo"], { cwd: dir });
+  const asked: unknown[] = [];
+  await runFlow({
+    flowPath,
+    verbose: false,
+    harness,
+    inputs: ["note=n"],
+    promptInput: async (input) => {
+      asked.push(input);
+      return input.id === "idea" ? "typed" : `${input.default}-edited`;
+    },
+  });
+  assert.deepEqual(asked, [
+    { id: "idea", required: true, default: "" },
+    { id: "branch", required: false, default: "feat/demo" },
+  ]);
+  assert.equal(harness.calls[0].prompt, "typed|feat/demo-edited|n");
 });
