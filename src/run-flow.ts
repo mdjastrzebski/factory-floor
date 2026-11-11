@@ -1,7 +1,11 @@
+import { execFileSync } from "node:child_process";
 import { mkdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { Harness, HarnessResult, ToolCall } from "./harness.ts";
 import { loadFlow } from "./flow-schema.ts";
+import { FlowRunError } from "./flow-run-error.ts";
+import { resolveInputs, resolveStepInputs, type InputPrompt } from "./inputs.ts";
+import { buildVariables, renderTemplate } from "./template.ts";
 
 export interface FlowStartInfo {
   id: string;
@@ -42,6 +46,15 @@ export interface RunFlowOptions {
   verbose: boolean;
   /** Harness used to execute each step; defaults to `new ClaudeCliHarness()` in the CLI entrypoint, injected directly in tests. */
   harness: Harness;
+  /** Raw `key=value` flow inputs from the CLI (`--input`), in order; parsed and validated by {@link resolveInputs}. */
+  inputs?: string[];
+  /**
+   * Asks for the value of each declared input not supplied in `inputs`, in
+   * declaration order, before any step runs; the answer counts as supplied.
+   * Without it, unsupplied inputs take their default (the CLI omits it when
+   * stdin is not a TTY, or with `--yes`).
+   */
+  promptInput?: (input: InputPrompt) => Promise<string>;
   /** Called once the flow file is loaded and validated, before any step runs. */
   onFlowStart?: (info: FlowStartInfo) => void;
   /** Called right before a step starts. */
@@ -73,14 +86,27 @@ export interface RunFlowResult {
   runDir: string;
 }
 
-/** Thrown for run-time problems that aren't flow-schema validation errors (e.g. a missing `cwd`). */
-export class FlowRunError extends Error {}
+export { FlowRunError };
+
+/** The branch checked out in `cwd`, or `""` when detached, not a git repo, or git is missing. */
+function currentGitBranch(cwd: string): string {
+  try {
+    return execFileSync("git", ["branch", "--show-current"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return "";
+  }
+}
 
 /**
  * Loads and validates the flow at `options.flowPath`, then runs its steps
  * strictly sequentially against `options.harness`, stopping immediately on
- * the first failing step. Always writes each attempted step's full raw
- * stdout+stderr to a log file under the returned `runDir`, regardless of
+ * the first failing step. Step prompts are rendered (`${{ … }}` references)
+ * before being handed to the harness. Always writes each attempted step's
+ * rendered prompt and full raw stdout+stderr to a log file under the returned `runDir`, regardless of
  * `verbose`.
  */
 export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
@@ -88,6 +114,8 @@ export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
     flowPath,
     verbose,
     harness,
+    inputs: rawInputs = [],
+    promptInput,
     onFlowStart,
     onStepStart,
     onStepComplete,
@@ -114,7 +142,18 @@ export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const runDir = join(cwd, ".factory-floor", "runs", timestamp);
+  const runCtx = { flow, cwd, runId: timestamp, runDir, gitBranch: currentGitBranch(cwd) };
+
+  const defaultVars = buildVariables({ ...runCtx, stepId: "", inputs: {} });
+  const inputs = await resolveInputs(
+    flow,
+    rawInputs,
+    (template) => renderTemplate(template, defaultVars),
+    promptInput,
+  );
+
   mkdirSync(runDir, { recursive: true });
+  writeFileSync(join(runDir, "inputs.json"), `${JSON.stringify(inputs, null, 2)}\n`, "utf8");
 
   const total = flow.steps.length;
   onFlowStart?.({ id: flow.id, name: flow.name, total });
@@ -124,6 +163,12 @@ export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
     const index = i + 1;
     const logPath = join(runDir, `${step.id}.log`);
 
+    const flowCtx = { ...runCtx, stepId: step.id, inputs };
+    const prompt = renderTemplate(
+      step.prompt,
+      buildVariables({ ...flowCtx, inputs: resolveStepInputs(step, flowCtx) }),
+    );
+
     onStepStart?.({ index, total, id: step.id, name: step.name });
     const startedAt = Date.now();
 
@@ -131,7 +176,7 @@ export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
     try {
       result = await harness.run({
         cwd,
-        prompt: step.prompt,
+        prompt,
         signal,
         onOutputChunk: verbose
           ? (chunk, stream) => onOutputChunk?.(step.id, chunk, stream)
@@ -149,7 +194,7 @@ export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
     }
 
     const durationMs = Date.now() - startedAt;
-    const logContents = `=== stdout ===\n${result.stdout}\n=== stderr ===\n${result.stderr}\n`;
+    const logContents = `=== prompt ===\n${prompt}\n=== stdout ===\n${result.stdout}\n=== stderr ===\n${result.stderr}\n`;
     writeFileSync(logPath, logContents, "utf8");
 
     for (const denial of result.permissionDenials ?? []) {

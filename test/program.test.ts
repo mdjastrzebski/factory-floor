@@ -107,3 +107,84 @@ test("--verbose streams prefixed harness output to the process streams", async (
   assert.equal(proc.stderrText, "[talk:stderr] oops\n");
   assert.equal(proc.exitCode, 0);
 });
+
+const INPUT_FLOW = `
+inputs:
+  idea: {}
+  branch: {default: main}
+steps:
+  - name: Spec
+    prompt: "do \${{ inputs.idea }} on \${{ inputs.branch }} in \${{ step.id }}"
+`;
+
+function promptRecorder(prompts: string[]): Harness {
+  return {
+    run: async ({ prompt }: HarnessRunOptions) => {
+      prompts.push(prompt);
+      return { success: true, exitCode: 0, stdout: "", stderr: "" };
+    },
+  };
+}
+
+test("--input is repeatable and reaches the harness rendered", async () => {
+  const flowPath = writeFlow(INPUT_FLOW);
+  const proc = new FakeProcess();
+  const prompts: string[] = [];
+
+  await buildProgram({
+    createHarness: () => promptRecorder(prompts),
+    proc,
+    createReporter: () => recordingReporter([]),
+  }).parseAsync(["run", flowPath, "--input", "idea=a=b", "--input", "branch=dev"], {
+    from: "user",
+  });
+
+  assert.deepEqual(prompts, ["do a=b on dev in spec"]);
+  assert.equal(proc.exitCode, 0);
+});
+
+test("a bad --input sets a non-zero exit code and never calls the harness", async () => {
+  const flowPath = writeFlow(INPUT_FLOW);
+  for (const args of [[], ["--input", "idea"], ["--input", "idea=x", "--input", "nope=1"]]) {
+    const proc = new FakeProcess();
+    const prompts: string[] = [];
+    const events: string[] = [];
+
+    await buildProgram({
+      createHarness: () => promptRecorder(prompts),
+      proc,
+      createReporter: () => recordingReporter(events),
+    }).parseAsync(["run", flowPath, ...args], { from: "user" });
+
+    assert.deepEqual(prompts, [], args.join(" "));
+    assert.deepEqual(events, ["reporter.fail"], args.join(" "));
+    assert.equal(proc.exitCode, 1, args.join(" "));
+  }
+});
+
+test("inputs missing from --input are prompted for, unless --yes", async () => {
+  const flowPath = writeFlow(INPUT_FLOW);
+  for (const [args, expected, expectedAsked] of [
+    [[], "do typed on main! in spec", ["idea", "branch"]],
+    [["--input", "idea=x"], "do x on main! in spec", ["branch"]],
+    [["--yes", "--input", "idea=x"], "do x on main in spec", []],
+  ] as const) {
+    const proc = new FakeProcess();
+    const prompts: string[] = [];
+    const asked: string[] = [];
+
+    await buildProgram({
+      createHarness: () => promptRecorder(prompts),
+      proc,
+      createReporter: () => recordingReporter([]),
+      promptInput: async (input) => {
+        asked.push(input.id);
+        return input.id === "idea" ? "typed" : `${input.default}!`;
+      },
+    }).parseAsync(["run", flowPath, ...args], { from: "user" });
+
+    assert.deepEqual(prompts, [expected], args.join(" "));
+    assert.deepEqual(asked, expectedAsked, args.join(" "));
+    assert.equal(proc.exitCode, 0, args.join(" "));
+  }
+});

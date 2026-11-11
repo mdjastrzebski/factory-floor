@@ -267,3 +267,143 @@ test("lists every issue with a dotted path; root issues have no ' at'", () => {
     / at /,
   );
 });
+
+function loadError(yamlText: string): string {
+  try {
+    parseFlow(yamlText, "flow.yaml");
+  } catch (error) {
+    assert.ok(error instanceof FlowValidationError);
+    return error.message;
+  }
+  assert.fail("expected parseFlow to throw");
+}
+
+test("a flow without inputs resolves inputs: []", () => {
+  assert.deepEqual(parseFlow("steps:\n  - {name: a, prompt: p}\n", "flow.yaml").inputs, []);
+  assert.deepEqual(
+    parseFlow("inputs: {}\nsteps:\n  - {name: a, prompt: p}\n", "flow.yaml").inputs,
+    [],
+  );
+});
+
+test("inputs: effective required, defaults, description and declaration order", () => {
+  const flow = parseFlow(
+    `
+inputs:
+  idea:
+    description: The idea
+    required: true
+  branch:
+    default: main
+  note:
+    required: false
+  explicit-empty:
+    default: ""
+  bare:
+steps:
+  - {name: a, prompt: p}
+`,
+    "flow.yaml",
+  );
+  assert.deepEqual(flow.inputs, [
+    { id: "idea", description: "The idea", required: true },
+    { id: "branch", required: false, default: "main" },
+    { id: "note", required: false },
+    { id: "explicit-empty", required: false, default: "" },
+    { id: "bare", required: true },
+  ]);
+});
+
+test("inputs: default together with required: true is an error", () => {
+  const message = loadError(
+    "inputs:\n  branch: {default: main, required: true}\nsteps:\n  - {name: a, prompt: p}\n",
+  );
+  assert.match(message, /^Invalid flow file flow\.yaml:/);
+  assert.match(message, /input "branch" has a default, so it cannot be required: true/);
+  assert.match(message, /at inputs\.branch\.required/);
+});
+
+test("inputs: default with required: false is fine", () => {
+  const flow = parseFlow(
+    "inputs:\n  b: {default: x, required: false}\nsteps:\n  - {name: a, prompt: p}\n",
+    "flow.yaml",
+  );
+  assert.deepEqual(flow.inputs, [{ id: "b", required: false, default: "x" }]);
+});
+
+test("inputs: a default may reference built-ins but not step.id or inputs", () => {
+  const flow = parseFlow(
+    'inputs:\n  b: {default: "${{ git.branch }}"}\nsteps:\n  - {name: a, prompt: p}\n',
+    "flow.yaml",
+  );
+  assert.deepEqual(flow.inputs, [{ id: "b", required: false, default: "${{ git.branch }}" }]);
+
+  const message = loadError(
+    'inputs:\n  a: {}\n  b: {default: "${{ step.id }}/${{ inputs.a }}"}\nsteps:\n  - {name: a, prompt: p}\n',
+  );
+  assert.match(message, /input "b": \$\{\{ step\.id \}\} is not available in a default/);
+  assert.match(message, /input "b": \$\{\{ inputs\.a \}\} is not available in a default/);
+  assert.match(message, /at inputs\.b\.default/);
+});
+
+test("inputs: a bad input id names the key", () => {
+  const message = loadError("inputs:\n  Bad Id: {}\nsteps:\n  - {name: a, prompt: p}\n");
+  assert.match(message, /input id must start with a lowercase letter/);
+  assert.match(message, /got "Bad Id"/);
+  assert.match(message, /at inputs\.Bad Id/);
+});
+
+test("inputs: non-string defaults and wrong types are rejected", () => {
+  for (const body of [
+    "{default: 5}",
+    "{default: true}",
+    "{required: yes-please}",
+    "{description: 3}",
+  ]) {
+    const message = loadError(`inputs:\n  x: ${body}\nsteps:\n  - {name: a, prompt: p}\n`);
+    assert.match(message, /at inputs\.x\./, body);
+  }
+});
+
+test("inputs: unknown keys in a definition are rejected", () => {
+  const message = loadError("inputs:\n  x: {type: string}\nsteps:\n  - {name: a, prompt: p}\n");
+  assert.match(message, /type/);
+  assert.match(message, /at inputs\.x/);
+});
+
+test("template references: an undeclared input is reported at the step's prompt", () => {
+  const message = loadError(
+    "inputs:\n  idea: {}\nsteps:\n  - {name: a, prompt: ok}\n  - {name: b, prompt: 'use ${{ inputs.foo }}'}\n",
+  );
+  assert.match(message, /^Invalid flow file flow\.yaml:/);
+  assert.match(message, /- unknown input "foo" in \$\{\{ inputs\.foo \}\} at steps\.1\.prompt/);
+});
+
+test("template references: unknown variables are rejected", () => {
+  for (const name of ["run.foo", "flow", "inputs", "step.name", "env.HOME"]) {
+    const message = loadError(`steps:\n  - {name: a, prompt: 'x \${{ ${name} }}'}\n`);
+    assert.match(message, new RegExp(`unknown variable "${name}".* at steps\\.0\\.prompt`), name);
+  }
+});
+
+test("template references: malformed syntax is reported at the step's prompt", () => {
+  for (const prompt of ["${{ inputs.a", "${{ }}", "${{ a | b }}"]) {
+    const message = loadError(`inputs:\n  a: {}\nsteps:\n  - {name: a, prompt: '${prompt}'}\n`);
+    assert.match(message, / at steps\.0\.prompt/, prompt);
+  }
+});
+
+test("template references: every problem is listed, built-ins and declared inputs pass", () => {
+  const message = loadError(
+    "inputs:\n  a: {}\nsteps:\n  - {name: a, prompt: '${{ inputs.x }} ${{ run.nope }}'}\n  - {name: b, prompt: '${{ inputs.a }} ${{ step.id }} ${{ run.dir }}'}\n  - {name: c, prompt: '${{'}\n",
+  );
+  assert.match(message, /unknown input "x"/);
+  assert.match(message, /unknown variable "run\.nope"/);
+  assert.match(message, /steps\.2\.prompt/);
+  assert.doesNotMatch(message, /steps\.1\.prompt/);
+});
+
+test("literal $ and {{ in a prompt are fine", () => {
+  const flow = parseFlow("steps:\n  - {name: a, prompt: 'cost $5 {{ x }} ${ y }'}\n", "flow.yaml");
+  assert.equal(flow.steps[0].prompt, "cost $5 {{ x }} ${ y }");
+});
