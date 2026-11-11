@@ -167,7 +167,7 @@ test("warnings are emitted for a failing step, before onStepComplete", async () 
   assert.deepEqual(events, ["warn:s:permission denied: nope", "complete:false"]);
 });
 
-test("log file has the exact stdout/stderr format, for successful and failed steps", async () => {
+test("log file has the exact prompt/stdout/stderr format, for successful and failed steps", async () => {
   const dir = tmp();
   const { harness } = scripted([
     ok({ stdout: "OUT", stderr: "ERR" }),
@@ -180,11 +180,11 @@ test("log file has the exact stdout/stderr format, for successful and failed ste
   });
   assert.equal(
     readFileSync(join(r.runDir, "a.log"), "utf8"),
-    "=== stdout ===\nOUT\n=== stderr ===\nERR\n",
+    "=== prompt ===\np\n=== stdout ===\nOUT\n=== stderr ===\nERR\n",
   );
   assert.equal(
     readFileSync(join(r.runDir, "b.log"), "utf8"),
-    "=== stdout ===\nx\n=== stderr ===\ny\n",
+    "=== prompt ===\np\n=== stdout ===\nx\n=== stderr ===\ny\n",
   );
 });
 

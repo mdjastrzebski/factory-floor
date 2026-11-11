@@ -36,7 +36,7 @@ const defaultReporter = (verbose: boolean): FlowReporter =>
 async function runCommand(
   deps: CliDeps,
   flowPath: string,
-  { verbose }: { verbose: boolean },
+  { verbose, input }: { verbose: boolean; input: string[] },
 ): Promise<void> {
   const { proc } = deps;
   intro(`${pc.bold(pc.cyan("factory-floor"))} ${pc.dim(flowPath)}`);
@@ -58,6 +58,7 @@ async function runCommand(
       flowPath,
       verbose,
       harness,
+      inputs: input,
       signal: controller.signal,
       onFlowStart: reporter.onFlowStart,
       onStepStart: reporter.onStepStart,
@@ -93,7 +94,13 @@ export function buildProgram(deps: CliDeps): Command {
     .description("Run a flow's steps in order against its working directory")
     .argument("<flow.yaml>", "path to the flow YAML file")
     .option("--verbose", "stream the agent's full raw output instead of showing spinners", false)
-    .action(async (flowPath: string, options: { verbose: boolean }) => {
+    .option(
+      "--input <key=value>",
+      "flow input (repeatable)",
+      (value: string, previous: string[]) => [...previous, value],
+      [] as string[],
+    )
+    .action(async (flowPath: string, options: { verbose: boolean; input: string[] }) => {
       await runCommand(deps, flowPath, options);
     });
 

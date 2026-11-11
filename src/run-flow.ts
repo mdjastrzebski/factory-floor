@@ -1,7 +1,8 @@
 import { mkdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { Harness, HarnessResult, ToolCall } from "./harness.ts";
-import { loadFlow } from "./flow-schema.ts";
+import { loadFlow, type Flow } from "./flow-schema.ts";
+import { renderTemplate } from "./template.ts";
 
 export interface FlowStartInfo {
   id: string;
@@ -42,6 +43,8 @@ export interface RunFlowOptions {
   verbose: boolean;
   /** Harness used to execute each step; defaults to `new ClaudeCliHarness()` in the CLI entrypoint, injected directly in tests. */
   harness: Harness;
+  /** Raw `key=value` flow inputs from the CLI (`--input`), in order; parsed and validated by {@link resolveInputs}. */
+  inputs?: string[];
   /** Called once the flow file is loaded and validated, before any step runs. */
   onFlowStart?: (info: FlowStartInfo) => void;
   /** Called right before a step starts. */
@@ -77,10 +80,55 @@ export interface RunFlowResult {
 export class FlowRunError extends Error {}
 
 /**
+ * Parses raw `key=value` strings (the value is everything after the first
+ * `=`, so it may contain `=` and newlines) and resolves them against the
+ * flow's declared inputs: supplied value, else default, else `""` for an
+ * optional input. Keys are in declaration order. Throws {@link FlowRunError}
+ * for a malformed or duplicate `--input`, an undeclared input, or any
+ * required input that was not supplied (all missing ones are listed).
+ */
+export function resolveInputs(flow: Flow, raw: string[]): Record<string, string> {
+  const declared = new Set(flow.inputs.map((input) => input.id));
+  const supplied = new Map<string, string>();
+  for (const entry of raw) {
+    const eq = entry.indexOf("=");
+    if (eq <= 0) {
+      throw new FlowRunError(`invalid --input ${JSON.stringify(entry)}: expected key=value`);
+    }
+    const key = entry.slice(0, eq);
+    if (!declared.has(key)) {
+      const known =
+        flow.inputs.length > 0
+          ? `flow declares: ${[...declared].join(", ")}`
+          : "flow declares no inputs";
+      throw new FlowRunError(`unknown input "${key}" (${known})`);
+    }
+    if (supplied.has(key)) {
+      throw new FlowRunError(`duplicate --input "${key}"`);
+    }
+    supplied.set(key, entry.slice(eq + 1));
+  }
+
+  const missing = flow.inputs.filter((input) => input.required && !supplied.has(input.id));
+  if (missing.length > 0) {
+    throw new FlowRunError(
+      missing.map((input) => `missing required input "${input.id}"`).join("; "),
+    );
+  }
+
+  const resolved: Record<string, string> = {};
+  for (const input of flow.inputs) {
+    resolved[input.id] = supplied.get(input.id) ?? input.default ?? "";
+  }
+  return resolved;
+}
+
+/**
  * Loads and validates the flow at `options.flowPath`, then runs its steps
  * strictly sequentially against `options.harness`, stopping immediately on
- * the first failing step. Always writes each attempted step's full raw
- * stdout+stderr to a log file under the returned `runDir`, regardless of
+ * the first failing step. Step prompts are rendered (`${{ … }}` references)
+ * before being handed to the harness. Always writes each attempted step's
+ * rendered prompt and full raw stdout+stderr to a log file under the returned `runDir`, regardless of
  * `verbose`.
  */
 export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
@@ -88,6 +136,7 @@ export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
     flowPath,
     verbose,
     harness,
+    inputs: rawInputs = [],
     onFlowStart,
     onStepStart,
     onStepComplete,
@@ -98,6 +147,7 @@ export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
   } = options;
 
   const flow = loadFlow(flowPath);
+  const inputs = resolveInputs(flow, rawInputs);
 
   const flowDir = dirname(resolve(flowPath));
   const cwd = flow.cwd ? (isAbsolute(flow.cwd) ? flow.cwd : resolve(flowDir, flow.cwd)) : flowDir;
@@ -115,6 +165,16 @@ export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const runDir = join(cwd, ".factory-floor", "runs", timestamp);
   mkdirSync(runDir, { recursive: true });
+  writeFileSync(join(runDir, "inputs.json"), `${JSON.stringify(inputs, null, 2)}\n`, "utf8");
+
+  const baseVars: Record<string, string> = {
+    "flow.id": flow.id,
+    "flow.name": flow.name,
+    "flow.cwd": cwd,
+    "run.id": timestamp,
+    "run.dir": runDir,
+  };
+  for (const [id, value] of Object.entries(inputs)) baseVars[`inputs.${id}`] = value;
 
   const total = flow.steps.length;
   onFlowStart?.({ id: flow.id, name: flow.name, total });
@@ -124,6 +184,8 @@ export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
     const index = i + 1;
     const logPath = join(runDir, `${step.id}.log`);
 
+    const prompt = renderTemplate(step.prompt, { ...baseVars, "step.id": step.id });
+
     onStepStart?.({ index, total, id: step.id, name: step.name });
     const startedAt = Date.now();
 
@@ -131,7 +193,7 @@ export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
     try {
       result = await harness.run({
         cwd,
-        prompt: step.prompt,
+        prompt,
         signal,
         onOutputChunk: verbose
           ? (chunk, stream) => onOutputChunk?.(step.id, chunk, stream)
@@ -149,7 +211,7 @@ export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
     }
 
     const durationMs = Date.now() - startedAt;
-    const logContents = `=== stdout ===\n${result.stdout}\n=== stderr ===\n${result.stderr}\n`;
+    const logContents = `=== prompt ===\n${prompt}\n=== stdout ===\n${result.stdout}\n=== stderr ===\n${result.stderr}\n`;
     writeFileSync(logPath, logContents, "utf8");
 
     for (const denial of result.permissionDenials ?? []) {

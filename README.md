@@ -25,6 +25,13 @@ name: My flow
 # optional; defaults to the directory containing this flow file
 cwd: ./somewhere
 
+# optional; values supplied on the command line with --input key=value
+inputs:
+  idea:
+    description: The rough idea to implement # optional
+  branch:
+    default: main # a default makes the input optional
+
 steps:
   - id: step-one # optional slug identifier, unique within the flow
     name: Do the first thing # optional human-readable label
@@ -34,7 +41,7 @@ steps:
   - name: Step two # id defaults to a slug of the name: "step-two"
     prompt: |
       Do the second thing, coordinating with step one only via files
-      already on disk in this directory.
+      already on disk in this directory. The idea is: ${{ inputs.idea }}
 ```
 
 Naming follows GitHub Actions: `id` is the stable, machine-facing
@@ -49,6 +56,8 @@ identifier and `name` is what people read.
 - `cwd` (optional) — the working directory every step runs in, resolved
   relative to the flow file's own directory if not absolute. Defaults to
   the directory containing the flow file. Shared across all steps.
+- `inputs` (optional) — values the caller supplies per run; see
+  [Inputs and template variables](#inputs-and-template-variables).
 - `steps` (required, non-empty array) — run strictly in order. Each step
   needs an `id`, a `name`, or both:
   - `id` (optional, same format as the flow `id`, unique within the flow) —
@@ -58,12 +67,15 @@ identifier and `name` is what people read.
     `-3`, etc.
   - `name` (optional, non-empty) — the label shown in progress output.
     Defaults to `id`. Steps without an `id` must have unique names.
-  - `prompt` (required, non-empty string) — passed as-is to the harness.
+  - `prompt` (required, non-empty string) — handed to the harness after
+    `${{ … }}` references are substituted (see below). Text without `${{`
+    is passed through unchanged.
 
 The flow file is parsed with the `yaml` package and validated with `zod`
 before anything runs. An invalid flow (missing `steps`, a step missing
 both `id` and `name`, a step missing `prompt`, a malformed or duplicate step
-`id`, a non-existent `cwd`, etc.) is
+`id`, a non-existent `cwd`, a bad `inputs:` definition, a prompt that
+references an undeclared input, etc.) is
 rejected with a clear error and a non-zero exit code, and no agent process
 is spawned.
 
@@ -89,6 +101,7 @@ defined or run.
 ```sh
 factory-floor run <flow.yaml>
 factory-floor run <flow.yaml> --verbose
+factory-floor run <flow.yaml> --input key=value --input other=value
 ```
 
 Default output is one terse line per step:
@@ -109,14 +122,91 @@ If any step exits non-zero, the flow stops immediately — later steps never
 run — and `factory-floor` exits non-zero. If every step succeeds, it exits 0. Pressing Ctrl-C (SIGINT) while a step is running kills that step's
 `claude` child process rather than leaving it running in the background.
 
+### Inputs and template variables
+
+A flow can declare `inputs:` so one flow file serves many tasks. The caller
+supplies values with a repeatable `--input key=value` flag, and step
+prompts reference them (and some built-in run variables) with `${{ … }}`.
+
+```yaml
+inputs:
+  idea:
+    description: The rough idea to implement # optional
+    required: true # optional, default true
+  branch:
+    default: main # a default makes it optional
+  note:
+    required: false # optional, no default -> ""
+
+steps:
+  - id: spec
+    prompt: |
+      Write a spec for: ${{ inputs.idea }}
+      Save it to ${{ run.dir }}/spec.md. Base branch: ${{ inputs.branch }}.
+```
+
+```sh
+factory-floor run flow.yaml --input idea="add a --dry-run flag" --input branch=dev
+```
+
+Input definitions:
+
+- `inputs` is a map from input id to a definition, and is optional. Ids use
+  the same format as flow and step ids (lowercase letters, digits, `-`, `_`).
+- A definition accepts only `description` (string), `required` (boolean)
+  and `default` (string); unknown keys are an error. All inputs are
+  strings: a non-string `default` such as `5` or `true` is rejected, so
+  quote it (`default: "5"`). An empty definition (`idea:` with nothing after
+  it) means required, no description.
+- An input is required unless it has a `default` or says `required: false`.
+  `default` together with `required: true` is an error. An optional input
+  with no default is the empty string when not supplied.
+
+`--input` rules:
+
+- The value is everything after the first `=`, so it can contain `=` and
+  newlines (`--input q=a=b` gives `a=b`). `--input idea=` supplies an empty
+  string, which counts as supplied and satisfies `required`.
+- Passing the same key twice, a key the flow does not declare (including any
+  `--input` for a flow with no `inputs:`), or a value with no `=` (or an
+  empty key) is an error. Every missing required input is reported at once.
+
+Template syntax: a reference is `${{ name }}`, where `name` is a dotted
+path of letters, digits, `_` and `-`. Spaces and tabs inside the braces are
+optional. Rendering is a single left-to-right pass: substituted values are
+inserted verbatim and never scanned again, so an input whose value contains
+`${{ inputs.other }}` stays literal. A lone `$`, `{{` without a `$`, or `${`
+are plain text. Any `${{` starts a reference; there is no escape syntax, and
+there are no defaults, filters or expressions. Templates apply to step
+`prompt` only (not `cwd`).
+
+| Variable               | Value                                                                          |
+| ---------------------- | ------------------------------------------------------------------------------ |
+| `inputs.<id>`          | the supplied value, else the default, else `""` (optional with no default)     |
+| `flow.id`, `flow.name` | the flow's resolved id and name                                                |
+| `flow.cwd`             | the absolute working directory                                                 |
+| `run.id`               | this run's timestamp id (the `<ISO-timestamp>` directory name)                 |
+| `run.dir`              | absolute `<cwd>/.factory-floor/runs/<run.id>`, where logs and `inputs.json` go |
+| `step.id`              | the current step's id                                                          |
+
+Validation happens before any agent process starts. At flow load time (an
+`Invalid flow file` error listing every problem with its location, such as
+`at steps.0.prompt`): a reference to an undeclared input
+(`inputs.foo`), an unknown variable (`run.foo`, `env.HOME`, bare `inputs`),
+malformed syntax (unterminated `${{`, empty `${{ }}`, a body that is not a
+plain dotted name such as `${{ inputs.x | upper }}`), and bad input
+definitions. At run start: missing required inputs and bad `--input`
+values, as described above.
+
 ### Logs
 
-Regardless of `--verbose`, the full raw stdout+stderr of every attempted
-step is always written to disk, so nothing is ever lost even in default
-(terse) mode:
+Regardless of `--verbose`, the rendered prompt and the full raw
+stdout+stderr of every attempted step are always written to disk, so nothing
+is ever lost even in default (terse) mode:
 
 ```
 <cwd>/.factory-floor/runs/<ISO-timestamp>/<step-id>.log
+<cwd>/.factory-floor/runs/<ISO-timestamp>/inputs.json
 ```
 
 - `<cwd>` is the flow's working directory (see above).
@@ -124,6 +214,12 @@ step is always written to disk, so nothing is ever lost even in default
   `factory-floor run` invocation).
 - `<step-id>` is the step's `id` (explicit, or derived from its `name` as
   described above).
+- Each log has three sections, in order: `=== prompt ===` (the prompt
+  exactly as sent to the harness, after `${{ … }}` substitution),
+  `=== stdout ===` and `=== stderr ===`.
+- `inputs.json` is written once per run, before the first step: the
+  resolved input values (supplied, default or `""`) as a JSON object in
+  declaration order, or `{}` when the flow declares no inputs.
 
 `.factory-floor/` is gitignored by this project's own `.gitignore`, and
 you'll likely want the same in any repo you point a flow at.

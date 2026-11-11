@@ -3,6 +3,7 @@ import { basename, extname } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { slugify, uniqueSlug } from "./slug.ts";
+import { checkReferences } from "./template.ts";
 
 /**
  * Identifier format for flow and step `id`s, modelled on GitHub Actions step
@@ -35,6 +36,20 @@ export const StepSchema = z
   });
 
 /**
+ * An input definition as written in YAML. A `null` definition (`idea:` with
+ * nothing after it) is treated as `{}`: required, no description. Inputs are
+ * untyped strings, so a non-string `default` is rejected rather than coerced.
+ */
+export const InputSchema = z.preprocess(
+  (value) => (value === null ? {} : value),
+  z.strictObject({
+    description: z.string().optional(),
+    required: z.boolean().optional(),
+    default: z.string().optional(),
+  }),
+);
+
+/**
  * A flow as written in YAML. Like a GitHub Actions workflow, `name` is the
  * human-readable title; `id` is the slug identifier (GitHub derives it from
  * the file name, which is also the default here).
@@ -44,9 +59,34 @@ export const FlowSchema = z
     id: idSchema("flow").optional(),
     name: z.string().min(1, "flow name must be a non-empty string").optional(),
     cwd: z.string().optional(),
+    inputs: z.record(z.string(), InputSchema).optional(),
     steps: z.array(StepSchema).min(1, "flow must have at least one step"),
   })
   .superRefine((flow, ctx) => {
+    const inputIds = Object.keys(flow.inputs ?? {});
+    for (const [id, input] of Object.entries(flow.inputs ?? {})) {
+      const idResult = idSchema("input").safeParse(id);
+      if (!idResult.success) {
+        ctx.addIssue({
+          code: "custom",
+          message: `${idResult.error.issues[0].message} (got "${id}")`,
+          path: ["inputs", id],
+        });
+      } else if (input.default !== undefined && input.required === true) {
+        ctx.addIssue({
+          code: "custom",
+          message: `input "${id}" has a default, so it cannot be required: true`,
+          path: ["inputs", id, "required"],
+        });
+      }
+    }
+
+    flow.steps.forEach((step, index) => {
+      for (const message of checkReferences(step.prompt, inputIds)) {
+        ctx.addIssue({ code: "custom", message, path: ["steps", index, "prompt"] });
+      }
+    });
+
     const seen = new Map<string, number>();
     flow.steps.forEach((step, index) => {
       const key = step.id ?? step.name;
@@ -77,6 +117,15 @@ export interface Step {
   prompt: string;
 }
 
+/** A declared flow input with its effective `required` resolved. */
+export interface FlowInput {
+  id: string;
+  description?: string;
+  /** Effective requiredness: false when a `default` exists, else `required` (default true). */
+  required: boolean;
+  default?: string;
+}
+
 /** A validated flow with its `id`, display `name` and step ids resolved. */
 export interface Flow {
   /** Slug identifier: the explicit `id`, or a slug of the flow file's base name. */
@@ -84,6 +133,8 @@ export interface Flow {
   /** Human-readable title: the explicit `name`, or `id`. */
   name: string;
   cwd?: string;
+  /** Declared inputs in declaration order; empty when the flow declares none. */
+  inputs: FlowInput[];
   steps: Step[];
 }
 
@@ -99,10 +150,17 @@ function resolveFlow(raw: RawFlow, flowPath: string): Flow {
     const stepId = step.id ?? uniqueSlug(step.name!, used);
     return { id: stepId, name: step.name ?? stepId, prompt: step.prompt };
   });
+  const inputs = Object.entries(raw.inputs ?? {}).map(([inputId, input]): FlowInput => ({
+    id: inputId,
+    ...(input.description !== undefined && { description: input.description }),
+    required: input.default !== undefined ? false : (input.required ?? true),
+    ...(input.default !== undefined && { default: input.default }),
+  }));
   return {
     id,
     name: raw.name ?? id,
     ...(raw.cwd !== undefined && { cwd: raw.cwd }),
+    inputs,
     steps,
   };
 }
