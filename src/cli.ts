@@ -1,13 +1,11 @@
 import { readFileSync } from "node:fs";
-import { relative } from "node:path";
 import { Command } from "commander";
 import { intro, log, outro } from "@clack/prompts";
 import pc from "picocolors";
-import { FlowValidationError } from "./flow-schema.ts";
-import type { ToolCall } from "./harness.ts";
-import { runFlow, FlowRunError } from "./run-flow.ts";
+import { runFlow } from "./run-flow.ts";
 import { ClaudeCliHarness } from "./harnesses/claude-cli-harness.ts";
-import { createSpinner, type Spinner } from "./terminal/spinner.ts";
+import { createFlowReporter } from "./terminal/flow-reporter.ts";
+import { createSpinner } from "./terminal/spinner.ts";
 
 // Resolves to the package root from both `src/cli.ts` and `dist/cli.js`.
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -15,77 +13,16 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
   description: string;
 };
 
-interface ActiveStep {
-  name: string;
-  /** `[i/total] <step name>`, the spinner's base text. */
-  label: string;
-  spinner: Spinner;
-  /** Tool calls seen so far this step, for the running count in the spinner. */
-  toolCallCount: number;
-}
-
-function formatDuration(ms: number): string {
-  return `${(ms / 1000).toFixed(1)}s`;
-}
-
-/** Renders an absolute path relative to the CLI's cwd, for display only. */
-function displayPath(path: string): string {
-  const rel = relative(process.cwd(), path);
-  return rel.startsWith("..") ? path : rel;
-}
-
-/** Max length of the detail excerpt shown in the spinner, in characters. */
-const DETAIL_EXCERPT_LENGTH = 50;
-
-/**
- * A short, generic excerpt of a tool call's detail, safe to show regardless
- * of what produced it (a file path, a shell command, a search pattern, ...).
- * Collapses whitespace, drops a leading shell `cd <dir>;`/`&&` prefix (rarely
- * meaningful to a reader - the step's cwd is already implied), and truncates
- * to a fixed length so one long detail can't dominate the line.
- */
-function detailExcerpt(detail: string): string {
-  const collapsed = detail.replace(/\s+/g, " ").trim();
-  const withoutCd = collapsed.replace(/^cd\s+\S+\s*(?:;|&&)\s*/, "");
-  if (withoutCd.length <= DETAIL_EXCERPT_LENGTH) return withoutCd;
-  return `${withoutCd.slice(0, DETAIL_EXCERPT_LENGTH - 1)}…`;
-}
-
-/**
- * `[i/total] <step name> → <generic activity>: <short detail excerpt> (#<n>)`.
- * Leads with what kind of thing the tool is doing (the harness's own
- * `activity` label, not its exact arguments - those vary wildly in length
- * and can be noisy, e.g. a chained shell command), then a bounded excerpt of
- * the actual argument, then a running count of tool calls this step so a
- * long, repetitive step (many edits, many searches) still reads as progress.
- * Pass `--verbose` to see exact, untruncated commands/paths/patterns.
- */
-function toolCallMessage(label: string, call: ToolCall, count: number): string {
-  const activity = call.activity ?? call.name;
-  const excerpt = call.detail && detailExcerpt(call.detail);
-  const detailSuffix = excerpt ? `: ${excerpt}` : "";
-  return `${label} ${pc.dim(`→ ${activity}${detailSuffix} (#${count})`)}`;
-}
-
 async function runCommand(flowPath: string, { verbose }: { verbose: boolean }): Promise<void> {
   intro(`${pc.bold(pc.cyan("factory-floor"))} ${pc.dim(flowPath)}`);
 
   const harness = new ClaudeCliHarness();
   const controller = new AbortController();
   const startedAt = Date.now();
-  let active: ActiveStep | undefined;
-  let cancelled = false;
-  let failedLogPath: string | undefined;
-  let stepCount = 0;
+  const reporter = createFlowReporter({ verbose, print: console, log, outro, createSpinner });
 
   const onSigint = () => {
-    cancelled = true;
-    if (active) {
-      active.spinner.cancel(pc.yellow(`${active.name} cancelled`));
-      active = undefined;
-    } else {
-      log.warn(pc.yellow("Received SIGINT, stopping the current step..."));
-    }
+    reporter.cancel();
     controller.abort();
   };
   process.once("SIGINT", onSigint);
@@ -96,54 +33,10 @@ async function runCommand(flowPath: string, { verbose }: { verbose: boolean }): 
       verbose,
       harness,
       signal: controller.signal,
-      onStepStart: ({ index, total, name }) => {
-        stepCount = total;
-        const label = `[${index}/${total}] ${name}`;
-        if (verbose) {
-          console.log(`${label}...`);
-          return;
-        }
-        const s = createSpinner();
-        s.start(label);
-        active = { name, label, spinner: s, toolCallCount: 0 };
-      },
-      onToolCall: verbose
-        ? undefined
-        : (stepName, call) => {
-            if (active?.name === stepName) {
-              active.toolCallCount++;
-              active.spinner.message(toolCallMessage(active.label, call, active.toolCallCount));
-            }
-          },
-      onWarning: (stepName, message) => {
-        if (verbose) {
-          console.error(`warning: [${stepName}] ${message}`);
-          return;
-        }
-        active?.spinner.erase();
-        log.warn(pc.yellow(`[${stepName}] ${message}`));
-      },
-      onStepComplete: ({ index, total, name, success, durationMs, logPath }) => {
-        if (!success) failedLogPath = logPath;
-        const duration = pc.dim(`(${formatDuration(durationMs)})`);
-        if (verbose) {
-          if (success) {
-            console.log(`[${index}/${total}] ${name} ${pc.green("done")} ${duration}`);
-          } else {
-            console.error(`[${index}/${total}] ${name} ${pc.red("failed")} ${duration}`);
-            console.error(`  log: ${displayPath(logPath)}`);
-          }
-          return;
-        }
-        // Already stopped with a "cancelled" message by the SIGINT handler.
-        if (!active) return;
-        if (success) {
-          active.spinner.stop(`${pc.green(`✓ ${name}`)} ${duration}`);
-        } else {
-          active.spinner.error(`${pc.red(`✗ ${name}`)} ${duration}`);
-        }
-        active = undefined;
-      },
+      onStepStart: reporter.onStepStart,
+      onToolCall: reporter.onToolCall,
+      onWarning: reporter.onWarning,
+      onStepComplete: reporter.onStepComplete,
       onOutputChunk: (stepName, chunk, stream) => {
         const prefix = `[${stepName}:${stream}] `;
         const text = chunk
@@ -157,33 +50,9 @@ async function runCommand(flowPath: string, { verbose }: { verbose: boolean }): 
         }
       },
     });
-
-    const elapsed = formatDuration(Date.now() - startedAt);
-    if (result.success) {
-      const steps = `${stepCount} step${stepCount === 1 ? "" : "s"}`;
-      outro(
-        `${pc.green(`✓ Flow succeeded: ${steps} in ${elapsed}`)} ${pc.dim(`logs: ${displayPath(result.runDir)}`)}`,
-      );
-      process.exitCode = 0;
-    } else {
-      const summary = cancelled
-        ? pc.yellow(`Flow cancelled during step "${result.failedStepName}" after ${elapsed}`)
-        : pc.red(`✗ Flow failed at step "${result.failedStepName}" after ${elapsed}`);
-      outro(`${summary} ${pc.dim(`log: ${displayPath(failedLogPath ?? result.runDir)}`)}`);
-      process.exitCode = 1;
-    }
+    process.exitCode = reporter.finish(result, Date.now() - startedAt);
   } catch (error) {
-    if (active) {
-      active.spinner.error(pc.red(`✗ ${active.name}`));
-      active = undefined;
-    }
-    if (error instanceof FlowRunError || error instanceof FlowValidationError) {
-      log.error(pc.red(error.message));
-    } else {
-      log.error(pc.red(error instanceof Error ? (error.stack ?? error.message) : String(error)));
-    }
-    outro(pc.red("✗ Flow failed"));
-    process.exitCode = 1;
+    process.exitCode = reporter.fail(error);
   } finally {
     process.off("SIGINT", onSigint);
   }
