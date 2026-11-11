@@ -14,6 +14,12 @@ importers:
       commander:
         specifier: ^15.1.0
         version: 15.1.0
+      fast-string-truncated-width:
+        specifier: ^3.0.3
+        version: 3.0.3
+      fast-string-width:
+        specifier: ^3.0.2
+        version: 3.0.2
       nano-spawn:
         specifier: ^2.1.0
         version: 2.1.0

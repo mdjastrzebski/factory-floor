@@ -1,12 +1,13 @@
 import { readFileSync } from "node:fs";
 import { isAbsolute, relative } from "node:path";
 import { Command } from "commander";
-import { intro, log, outro, spinner } from "@clack/prompts";
+import { intro, log, outro } from "@clack/prompts";
 import pc from "picocolors";
 import { FlowValidationError } from "./flow-schema.ts";
 import type { ToolCall } from "./harness.ts";
 import { runFlow, FlowRunError } from "./run-flow.ts";
 import { ClaudeCliHarness } from "./harnesses/claude-cli-harness.ts";
+import { createSpinner, type Spinner } from "./terminal/spinner.ts";
 
 // Resolves to the package root from both `src/cli.ts` and `dist/cli.js`.
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -14,15 +15,11 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
   description: string;
 };
 
-type Spinner = ReturnType<typeof spinner>;
-
 interface ActiveStep {
   name: string;
   /** `[i/total] <step name>`, the spinner's base text. */
   label: string;
   spinner: Spinner;
-  /** Most recent text passed to `spinner.message()` (or `label`, before any tool call). */
-  lastMessage: string;
 }
 
 function formatDuration(ms: number): string {
@@ -40,30 +37,19 @@ function displayPathIfAbsolute(text: string): string {
   return isAbsolute(text) ? displayPath(text) : text;
 }
 
-/** Truncates `text` to at most `max` characters (by code point), marking the cut with `…`. */
-function truncate(text: string, max: number): string {
-  const chars = [...text];
-  return chars.length > max ? `${chars.slice(0, Math.max(0, max - 1)).join("")}…` : text;
-}
-
-/** `[i/total] <step name> → <tool> <detail>`, kept to one terminal line so the spinner never wraps. */
+/**
+ * `[i/total] <step name> → <tool> <detail>`. The spinner truncates it to the
+ * terminal width; control characters (tabs, escapes) are blanked so they
+ * can't throw off its width math.
+ */
 function toolCallMessage(label: string, call: ToolCall): string {
   const rawDetail = call.detail?.split("\n")[0].trim();
   const detail = rawDetail && displayPathIfAbsolute(rawDetail);
-  const activity = detail ? `${call.name} ${detail}` : call.name;
-  // Leave room for the spinner frame and its animated "..." suffix.
-  const available = (process.stdout.columns || 80) - [...label].length - 12;
-  return `${label} ${pc.dim(`→ ${truncate(activity, Math.max(10, available))}`)}`;
-}
-
-/**
- * clack's spinner puts a TTY stdin into raw mode while active and calls
- * `process.exit(0)` itself on Ctrl-C, which would skip our SIGINT handler and
- * orphan the in-flight `claude` process. Switching back to cooked mode keeps
- * Ctrl-C delivering a real SIGINT (to us and the child), as before.
- */
-function keepCtrlCAsSigint(): void {
-  if (process.stdin.isTTY) process.stdin.setRawMode(false);
+  const activity = (detail ? `${call.name} ${detail}` : call.name).replace(
+    new RegExp(String.raw`[\x00-\x1f\x7f-\x9f]`, "g"),
+    " ",
+  );
+  return `${label} ${pc.dim(`→ ${activity}`)}`;
 }
 
 async function runCommand(flowPath: string, { verbose }: { verbose: boolean }): Promise<void> {
@@ -77,17 +63,6 @@ async function runCommand(flowPath: string, { verbose }: { verbose: boolean }): 
   let failedLogPath: string | undefined;
   let stepCount = 0;
 
-  /**
-   * clack's spinner leaves its current frame on the line without a trailing
-   * newline, so a `log.*` call would be glued onto it. On a TTY, erase the
-   * frame (the spinner redraws below the log line on its next tick);
-   * otherwise just end the frame's line.
-   */
-  const clearSpinnerLine = () => {
-    if (!active) return;
-    process.stdout.write(process.stdout.isTTY ? "\r\x1b[2K" : "\n");
-  };
-
   const onSigint = () => {
     cancelled = true;
     if (active) {
@@ -99,31 +74,6 @@ async function runCommand(flowPath: string, { verbose }: { verbose: boolean }): 
     controller.abort();
   };
   process.once("SIGINT", onSigint);
-
-  /**
-   * clack's spinner reads `process.stdout.columns` once, when it's created,
-   * and reuses that stale width forever to work out how many lines to erase
-   * before redrawing. Narrowing the terminal while a spinner is running
-   * makes that erase math wrong, so each redraw leaves part of the old
-   * frame behind and it scrolls into history as garbage. We can't fix
-   * clack's math, so on resize we abandon the corrupted line (a newline
-   * commits whatever's there to scrollback) and swap in a brand-new spinner,
-   * which re-reads the current width.
-   */
-  let resizeTimer: NodeJS.Timeout | undefined;
-  const onResize = () => {
-    clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => {
-      if (!active || verbose) return;
-      const { name, label, lastMessage } = active;
-      process.stdout.write("\n");
-      const s = spinner({ cancelMessage: pc.yellow(`${name} cancelled`) });
-      s.start(lastMessage);
-      keepCtrlCAsSigint();
-      active = { name, label, spinner: s, lastMessage };
-    }, 100);
-  };
-  if (process.stdout.isTTY) process.stdout.on("resize", onResize);
 
   try {
     const result = await runFlow({
@@ -138,18 +88,15 @@ async function runCommand(flowPath: string, { verbose }: { verbose: boolean }): 
           console.log(`${label}...`);
           return;
         }
-        const s = spinner({ cancelMessage: pc.yellow(`${name} cancelled`) });
+        const s = createSpinner();
         s.start(label);
-        keepCtrlCAsSigint();
-        active = { name, label, spinner: s, lastMessage: label };
+        active = { name, label, spinner: s };
       },
       onToolCall: verbose
         ? undefined
         : (stepName, call) => {
             if (active?.name === stepName) {
-              const message = toolCallMessage(active.label, call);
-              active.spinner.message(message);
-              active.lastMessage = message;
+              active.spinner.message(toolCallMessage(active.label, call));
             }
           },
       onWarning: (stepName, message) => {
@@ -157,7 +104,7 @@ async function runCommand(flowPath: string, { verbose }: { verbose: boolean }): 
           console.error(`warning: [${stepName}] ${message}`);
           return;
         }
-        clearSpinnerLine();
+        active?.spinner.erase();
         log.warn(pc.yellow(`[${stepName}] ${message}`));
       },
       onStepComplete: ({ index, total, name, success, durationMs, logPath }) => {
@@ -223,8 +170,6 @@ async function runCommand(flowPath: string, { verbose }: { verbose: boolean }): 
     process.exitCode = 1;
   } finally {
     process.off("SIGINT", onSigint);
-    process.stdout.off("resize", onResize);
-    clearTimeout(resizeTimer);
   }
 }
 
