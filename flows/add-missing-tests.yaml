@@ -6,11 +6,10 @@
 # prompts below are intentionally codebase-agnostic: they describe what to
 # do in terms of "the codebase in this directory", not any specific file.
 #
-# `cwd` is omitted, so it defaults to the directory containing this file
-# (examples/hello-flow/), which ships a small pre-existing JavaScript module
-# (src/parseCsvLine.js) as the demo payload for the flow to analyze.
+# `cwd: ..` points at the repo root, since this file lives in flows/.
 id: add-missing-tests
 name: Add missing tests
+cwd: ..
 steps:
   - id: identify-test-scenarios
     name: Identify test scenarios
