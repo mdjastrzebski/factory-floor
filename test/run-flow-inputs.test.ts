@@ -6,7 +6,8 @@ import { basename, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import type { Harness, HarnessResult, HarnessRunOptions } from "../src/harness.ts";
 import { FlowValidationError, parseFlow } from "../src/flow-schema.ts";
-import { FlowRunError, resolveInputs, runFlow } from "../src/run-flow.ts";
+import { resolveInputs } from "../src/inputs.ts";
+import { FlowRunError, runFlow } from "../src/run-flow.ts";
 
 class FakeHarness implements Harness {
   calls: HarnessRunOptions[] = [];
