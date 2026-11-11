@@ -1,0 +1,52 @@
+# One-step cleanup pass over the current branch's changes: remove what those
+# changes made unnecessary, without changing behavior or touching unrelated
+# code.
+#
+# `cwd: ..` points at the repo root, since this file lives in flows/.
+id: cleanup-pass
+name: Cleanup pass
+cwd: ..
+steps:
+  - id: cleanup
+    name: Clean up
+    prompt: |
+      Do a cleanup pass on the changes made on the current branch. The goal
+      is less code, not different code: every change must keep behavior the
+      same.
+
+      Scope: the changes are everything since the branch's merge base with
+      the default branch (usually main), plus uncommitted and untracked
+      files. Work only on:
+      - the files and lines those changes touched, and
+      - code the changes made obsolete elsewhere: things that are now
+        unused because a caller was removed or simplified, old code paths
+        the changes replaced, and tests or docs for that code.
+      Leave every other part of the codebase alone, even if it could use a
+      cleanup too.
+
+      Within that scope, remove:
+      1. Dead code: unused functions, exports, variables, imports, types,
+         files, and unreachable branches; dependencies in package.json that
+         nothing imports any more. Before deleting anything, search the
+         whole repo (including tests, scripts, configs and docs) to confirm
+         it is unused. Keep anything that is part of the public surface (CLI
+         commands and flags, package entry points).
+      2. Comments that add nothing: ones that restate the code, describe
+         history ("now uses X", "changed from Y"), are stale or wrong, or
+         are commented-out code. Shorten comments that are longer than they
+         need to be. Keep comments that explain why, warn about a
+         non-obvious constraint, or document public API.
+      3. Tests that no longer earn their place: tests for code that was
+         removed, duplicates of another test's coverage, tests that only
+         check trivial things or implementation details, and leftover
+         skip/only markers. Never remove the only test for a real behavior.
+      4. Leftovers: debug logging, stray temporary or generated files, and
+         docs that mention things that no longer exist.
+
+      Do not refactor, rename, reformat, or "improve" code that stays. When
+      unsure whether something is still needed, leave it in.
+
+      When done, run the project's build, lint and tests and fix anything
+      your changes broke. Finish with a short summary: what you removed,
+      grouped by the categories above, and what you left in but suspect is
+      unused.
