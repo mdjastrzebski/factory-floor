@@ -1,5 +1,5 @@
 import type { Flow, Step } from "./flow-schema.ts";
-import { FlowRunError } from "./run-flow.ts";
+import { FlowRunError } from "./flow-run-error.ts";
 import { buildVariables, renderTemplate, type VariableContext } from "./template.ts";
 
 /** An input the caller did not supply with `--input`, handed to `RunFlowOptions.promptInput`. */

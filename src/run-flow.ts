@@ -3,6 +3,7 @@ import { mkdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { Harness, HarnessResult, ToolCall } from "./harness.ts";
 import { loadFlow } from "./flow-schema.ts";
+import { FlowRunError } from "./flow-run-error.ts";
 import { resolveInputs, resolveStepInputs, type InputPrompt } from "./inputs.ts";
 import { buildVariables, renderTemplate } from "./template.ts";
 
@@ -85,8 +86,7 @@ export interface RunFlowResult {
   runDir: string;
 }
 
-/** Thrown for run-time problems that aren't flow-schema validation errors (e.g. a missing `cwd`). */
-export class FlowRunError extends Error {}
+export { FlowRunError };
 
 /** The branch checked out in `cwd`, or `""` when detached, not a git repo, or git is missing. */
 function currentGitBranch(cwd: string): string {
