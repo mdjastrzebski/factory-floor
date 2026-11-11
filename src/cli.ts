@@ -6,6 +6,7 @@ import { runFlow } from "./run-flow.ts";
 import { ClaudeCliHarness } from "./harnesses/claude-cli-harness.ts";
 import { createFlowReporter } from "./terminal/flow-reporter.ts";
 import { createSpinner } from "./terminal/spinner.ts";
+import { createVerboseOutputFormatter } from "./terminal/verbose-output.ts";
 
 // Resolves to the package root from both `src/cli.ts` and `dist/cli.js`.
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -20,6 +21,7 @@ async function runCommand(flowPath: string, { verbose }: { verbose: boolean }): 
   const controller = new AbortController();
   const startedAt = Date.now();
   const reporter = createFlowReporter({ verbose, print: console, log, outro, createSpinner });
+  const formatOutput = createVerboseOutputFormatter();
 
   const onSigint = () => {
     reporter.cancel();
@@ -39,11 +41,7 @@ async function runCommand(flowPath: string, { verbose }: { verbose: boolean }): 
       onWarning: reporter.onWarning,
       onStepComplete: reporter.onStepComplete,
       onOutputChunk: (stepId, chunk, stream) => {
-        const prefix = `[${stepId}:${stream}] `;
-        const text = chunk
-          .split("\n")
-          .map((line, i, arr) => (i === arr.length - 1 && line === "" ? line : prefix + line))
-          .join("\n");
+        const text = formatOutput(stepId, chunk, stream);
         if (stream === "stdout") {
           process.stdout.write(text);
         } else {
