@@ -211,8 +211,9 @@ path of letters, digits, `_` and `-`. Spaces and tabs inside the braces are
 optional. Rendering is a single left-to-right pass: substituted values are
 inserted verbatim and never scanned again, so an input whose value contains
 `${{ inputs.other }}` stays literal. A lone `$`, `{{` without a `$`, or `${`
-are plain text. Any `${{` starts a reference; there is no escape syntax, and
-there are no defaults, filters or expressions. Templates apply to step
+are plain text. Any other `${{` starts a reference; write `$${{` for a literal
+`${{` (so `$${{ secrets.TOKEN }}` renders as `${{ secrets.TOKEN }}`). There
+are no defaults, filters or expressions. Templates apply to step
 `prompt` only (not `cwd`).
 
 | Variable               | Value                                                                          |

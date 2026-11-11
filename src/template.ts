@@ -49,16 +49,22 @@ const NAME_PATTERN = /^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$/;
 
 /**
  * Splits a template into literal text and `${{ name }}` references. Any
- * `${{` starts a reference (there is no escaping). Throws
- * {@link TemplateSyntaxError} on an unterminated reference, an empty body, or
- * a body that is not a plain dotted path.
+ * `${{` starts a reference, except `$${{`, which is an escape for a literal
+ * `${{`. Throws {@link TemplateSyntaxError} on an unterminated reference, an
+ * empty body, or a body that is not a plain dotted path.
  */
 export function parseTemplate(template: string): TemplateSegment[] {
   const segments: TemplateSegment[] = [];
   let pos = 0;
+  let text = "";
   while (pos < template.length) {
     const start = template.indexOf(OPEN, pos);
     if (start === -1) break;
+    if (start > pos && template[start - 1] === "$") {
+      text += template.slice(pos, start - 1) + OPEN;
+      pos = start + OPEN.length;
+      continue;
+    }
     const end = template.indexOf(CLOSE, start + OPEN.length);
     if (end === -1) {
       throw new TemplateSyntaxError(
@@ -75,11 +81,14 @@ export function parseTemplate(template: string): TemplateSegment[] {
         `invalid reference ${raw}: expected a dotted name such as inputs.idea`,
       );
     }
-    if (start > pos) segments.push({ kind: "text", text: template.slice(pos, start) });
+    text += template.slice(pos, start);
+    if (text !== "") segments.push({ kind: "text", text });
+    text = "";
     segments.push({ kind: "ref", name, raw });
     pos = end + CLOSE.length;
   }
-  if (pos < template.length) segments.push({ kind: "text", text: template.slice(pos) });
+  text += template.slice(pos);
+  if (text !== "") segments.push({ kind: "text", text });
   return segments;
 }
 

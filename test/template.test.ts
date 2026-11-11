@@ -67,6 +67,25 @@ test("a lone $, {{ without $, and ${ without a second { are literal text", () =>
   }
 });
 
+test("$${{ escapes a literal ${{ and is not a reference", () => {
+  assert.deepEqual(parseTemplate("a $${{ b"), [{ kind: "text", text: "a ${{ b" }]);
+  assert.equal(renderTemplate("$${{ secrets.TOKEN }}", {}), "${{ secrets.TOKEN }}");
+  assert.equal(renderTemplate("$${{", {}), "${{");
+  assert.equal(renderTemplate("$$${{ x }}", {}), "$${{ x }}");
+  assert.deepEqual(checkReferences("token: $${{ secrets.TOKEN }}", []), []);
+  assert.deepEqual(checkReferences("unterminated $${{ ok", []), []);
+});
+
+test("escaped and real references mix", () => {
+  const template = "${{ inputs.a }} uses $${{ secrets.TOKEN }} and $${{${{ inputs.a }}}}";
+  assert.deepEqual(checkReferences(template, ["a"]), []);
+  assert.deepEqual(checkReferences(template, []), ['unknown input "a" in ${{ inputs.a }}']);
+  assert.equal(
+    renderTemplate(template, { "inputs.a": "X" }),
+    "X uses ${{ secrets.TOKEN }} and ${{X}}",
+  );
+});
+
 test("renderTemplate substitutes every occurrence", () => {
   assert.equal(renderTemplate("${{ a }}-${{b}}-${{ a }}", { a: "1", b: "2" }), "1-2-1");
 });
