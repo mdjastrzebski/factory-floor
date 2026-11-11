@@ -199,14 +199,50 @@ for (const [label, yamlText] of loadTimeErrors) {
   });
 }
 
-test("resolveInputs is pure: resolves values against a parsed flow", () => {
-  const flow = parseFlow(
-    "inputs:\n  a: {}\n  b: {default: d}\n  c: {required: false}\nsteps:\n  - {name: s, prompt: p}\n",
-    "flow.yaml",
+const RESOLVE_FLOW =
+  "inputs:\n  a: {description: The a}\n  b: {default: d}\n  c: {required: false}\nsteps:\n  - {name: s, prompt: p}\n";
+const asIs = (template: string) => template;
+
+test("resolveInputs resolves supplied values and defaults against a parsed flow", async () => {
+  const flow = parseFlow(RESOLVE_FLOW, "flow.yaml");
+  assert.deepEqual(await resolveInputs(flow, ["a=1"], asIs), { a: "1", b: "d", c: "" });
+  assert.deepEqual(await resolveInputs(flow, ["c=x=y", "a=", "b=z"], asIs), {
+    a: "",
+    b: "z",
+    c: "x=y",
+  });
+  await assert.rejects(() => resolveInputs(flow, [], asIs), FlowRunError);
+});
+
+test("resolveInputs renders defaults with the given renderer", async () => {
+  const flow = parseFlow(RESOLVE_FLOW, "flow.yaml");
+  const resolved = await resolveInputs(flow, ["a=1"], (template) => `<${template}>`);
+  assert.deepEqual(resolved, { a: "1", b: "<d>", c: "" });
+});
+
+test("resolveInputs prompts for each unsupplied input in order, with its rendered default", async () => {
+  const flow = parseFlow(RESOLVE_FLOW, "flow.yaml");
+  const asked: unknown[] = [];
+  const resolved = await resolveInputs(
+    flow,
+    ["c=n"],
+    (template) => `${template}!`,
+    async (input) => {
+      asked.push(input);
+      return input.id === "a" ? "typed" : `${input.default}-edited`;
+    },
   );
-  assert.deepEqual(resolveInputs(flow, ["a=1"]), { a: "1", b: "d", c: "" });
-  assert.deepEqual(resolveInputs(flow, ["c=x=y", "a=", "b=z"]), { a: "", b: "z", c: "x=y" });
-  assert.throws(() => resolveInputs(flow, []), FlowRunError);
+  assert.deepEqual(asked, [
+    { id: "a", description: "The a", required: true, default: "" },
+    { id: "b", required: false, default: "d!" },
+  ]);
+  assert.deepEqual(resolved, { a: "typed", b: "d!-edited", c: "n" });
+});
+
+test("resolveInputs keeps an empty prompted answer instead of the default", async () => {
+  const flow = parseFlow(RESOLVE_FLOW, "flow.yaml");
+  const resolved = await resolveInputs(flow, [], asIs, async () => "");
+  assert.deepEqual(resolved, { a: "", b: "", c: "" });
 });
 
 const PROMPT_FLOW = `

@@ -152,25 +152,41 @@ function finalizeInputs(
 }
 
 /**
- * Parses raw `--input` strings and resolves them against the flow's declared
- * inputs (see {@link parseInputArgs} and {@link finalizeInputs}). `defaults`
- * are the rendered defaults keyed by input id; they default to the flow's
- * `default` strings as written.
+ * Resolves the flow's declared inputs from raw `--input` strings (see
+ * {@link parseInputArgs}). Each declared `default` is passed through
+ * `renderDefault` (e.g. to substitute built-ins such as `git.branch`). When
+ * `promptInput` is given, it is asked for each unsupplied input in declaration
+ * order and its answer counts as supplied, even when empty. The result is then
+ * finalized (see {@link finalizeInputs}).
  */
-export function resolveInputs(
+export async function resolveInputs(
   flow: Flow,
   raw: string[],
-  defaults: Readonly<Record<string, string>> = rawDefaults(flow),
-): Record<string, string> {
-  return finalizeInputs(flow, parseInputArgs(flow, raw), defaults);
-}
-
-function rawDefaults(flow: Flow): Record<string, string> {
-  return Object.fromEntries(
-    flow.inputs.flatMap((input) =>
-      input.default !== undefined ? [[input.id, input.default]] : [],
-    ),
-  );
+  renderDefault: (template: string) => string,
+  promptInput?: (input: InputPrompt) => Promise<string>,
+): Promise<Record<string, string>> {
+  const supplied = parseInputArgs(flow, raw);
+  const defaults: Record<string, string> = {};
+  for (const input of flow.inputs) {
+    if (input.default !== undefined) {
+      defaults[input.id] = renderDefault(input.default);
+    }
+  }
+  if (promptInput) {
+    for (const input of flow.inputs) {
+      if (supplied.has(input.id)) continue;
+      supplied.set(
+        input.id,
+        await promptInput({
+          id: input.id,
+          ...(input.description !== undefined && { description: input.description }),
+          required: input.required,
+          default: defaults[input.id] ?? "",
+        }),
+      );
+    }
+  }
+  return finalizeInputs(flow, supplied, defaults);
 }
 
 /** The branch checked out in `cwd`, or `""` when detached, not a git repo, or git is missing. */
@@ -232,7 +248,6 @@ export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
   } = options;
 
   const flow = loadFlow(flowPath);
-  const supplied = parseInputArgs(flow, rawInputs);
 
   const flowDir = dirname(resolve(flowPath));
   const cwd = flow.cwd ? (isAbsolute(flow.cwd) ? flow.cwd : resolve(flowDir, flow.cwd)) : flowDir;
@@ -252,27 +267,12 @@ export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
   const runCtx = { flow, cwd, runId: timestamp, runDir, gitBranch: currentGitBranch(cwd) };
 
   const defaultVars = buildVariables({ ...runCtx, stepId: "", inputs: {} });
-  const defaults: Record<string, string> = {};
-  for (const input of flow.inputs) {
-    if (input.default !== undefined) {
-      defaults[input.id] = renderTemplate(input.default, defaultVars);
-    }
-  }
-  if (promptInput) {
-    for (const input of flow.inputs) {
-      if (supplied.has(input.id)) continue;
-      supplied.set(
-        input.id,
-        await promptInput({
-          id: input.id,
-          ...(input.description !== undefined && { description: input.description }),
-          required: input.required,
-          default: defaults[input.id] ?? "",
-        }),
-      );
-    }
-  }
-  const inputs = finalizeInputs(flow, supplied, defaults);
+  const inputs = await resolveInputs(
+    flow,
+    rawInputs,
+    (template) => renderTemplate(template, defaultVars),
+    promptInput,
+  );
 
   mkdirSync(runDir, { recursive: true });
   writeFileSync(join(runDir, "inputs.json"), `${JSON.stringify(inputs, null, 2)}\n`, "utf8");
