@@ -54,7 +54,7 @@ is spawned.
 Each step is run as its own `claude -p "<prompt>" --permission-mode auto
 --permission-prompts none` child process. `auto` mode uses a classifier to
 approve ordinary file edits and declared-dependency commands (e.g.
-`npm test`, `npm run lint`) unattended, while still blocking clearly risky
+`pnpm test`, `pnpm run lint`) unattended, while still blocking clearly risky
 actions (force-push, `curl | bash`, deploys) - unlike `acceptEdits`, which
 never approves arbitrary Bash, so a step whose prompt needs to run a
 command would otherwise silently fail to do so. If the harness denies any
@@ -129,12 +129,12 @@ inside quotes, escaped `""` quotes, empty fields) for step 1 to find.
 To try it:
 
 ```sh
-npm install
-npm run build
+pnpm install
+pnpm run build
 node dist/cli.js run examples/hello-flow/flow.yaml --verbose
 ```
 
-(or, after `npm link`/a global install, `factory-floor run
+(or, after `pnpm link --global`/a global install, `factory-floor run
 examples/hello-flow/flow.yaml --verbose`.)
 
 **Note:** running this invokes the real `claude` CLI three times, once per
@@ -151,13 +151,13 @@ under `examples/hello-flow/.factory-floor/runs/<timestamp>/`.
 ## Development
 
 ```sh
-npm install
-npm run dev -- run examples/hello-flow/flow.yaml   # run from source via tsx
-npm run build                                       # compile to dist/
-npm test                                            # node:test, no real `claude` calls
-npm run lint                                         # oxlint
-npm run format                                       # oxfmt --check
-npm run format:write                                 # oxfmt (writes fixes)
+pnpm install
+pnpm run dev -- run examples/hello-flow/flow.yaml   # run from source via tsx
+pnpm run build                                       # compile to dist/
+pnpm test                                            # node:test, no real `claude` calls
+pnpm run lint                                         # oxlint
+pnpm run format                                       # oxfmt --check
+pnpm run format:write                                 # oxfmt (writes fixes)
 ```
 
 Tests use a fake in-memory `Harness` (see `test/run-flow.test.ts`) to
