@@ -1,14 +1,14 @@
 /**
- * Turns a step name into a filesystem-safe slug for its log file: lowercased,
- * with every run of non-alphanumeric characters collapsed to a single `-`
- * and leading/trailing `-` trimmed.
+ * Turns a human-readable name into a filesystem-safe slug: lowercased, with
+ * every run of non-alphanumeric characters collapsed to a single `-` and
+ * leading/trailing `-` trimmed. Returns `fallback` if nothing is left.
  */
-export function slugify(name: string): string {
+export function slugify(name: string, fallback = "step"): string {
   const slug = name
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
-  return slug.length > 0 ? slug : "step";
+  return slug.length > 0 ? slug : fallback;
 }
 
 /**

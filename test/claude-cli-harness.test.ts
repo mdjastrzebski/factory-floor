@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClaudeCliHarness } from "../src/harnesses/claude-cli-harness.ts";
@@ -66,5 +66,159 @@ test("ClaudeCliHarness does not corrupt a multi-byte UTF-8 character split acros
   assert.ok(
     !streamed.includes("�"),
     `expected no replacement characters in streamed chunks, got: ${JSON.stringify(streamed)}`,
+  );
+});
+
+/**
+ * Writes a fake `claude` that records its pid, emits one stream-json tool
+ * call, then hangs until killed - for exercising abort and tool-call events.
+ */
+function writeHangingFakeClaude(dir: string): string {
+  const scriptPath = join(dir, "claude");
+  const pidPath = join(dir, "pid");
+  const toolUse = JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", name: "Edit", input: { file_path: "src/a.ts" } }] },
+  });
+  const script = `#!/usr/bin/env node
+require("node:fs").writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+process.stdout.write(${JSON.stringify(toolUse)} + "\\n");
+process.stderr.write("working\\n");
+setInterval(() => {}, 1000);
+`;
+  writeFileSync(scriptPath, script, "utf8");
+  chmodSync(scriptPath, 0o755);
+  return pidPath;
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test("ClaudeCliHarness kills the subprocess when the signal aborts and reports tool calls", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "factory-floor-fake-claude-"));
+  const pidPath = writeHangingFakeClaude(dir);
+
+  const harness = new ClaudeCliHarness();
+  const controller = new AbortController();
+  const toolCalls: unknown[] = [];
+
+  const originalPath = process.env.PATH ?? "";
+  process.env.PATH = `${dir}:${originalPath}`;
+  let result;
+  try {
+    result = await harness.run({
+      cwd: dir,
+      prompt: "irrelevant",
+      signal: controller.signal,
+      onToolCall: (call) => {
+        toolCalls.push(call);
+        // Abort once the subprocess is demonstrably running and streaming.
+        controller.abort();
+      },
+    });
+  } finally {
+    process.env.PATH = originalPath;
+  }
+
+  assert.equal(result.success, false);
+  assert.equal(result.exitCode, null);
+  assert.deepEqual(toolCalls, [{ name: "Edit", detail: "src/a.ts", activity: "Editing file" }]);
+  assert.ok(result.stdout.includes('"tool_use"'), `unexpected stdout: ${result.stdout}`);
+  assert.equal(result.stderr, "working\n");
+
+  const pid = Number(readFileSync(pidPath, "utf8"));
+  assert.equal(isAlive(pid), false, `expected fake claude (pid ${pid}) to have been killed`);
+});
+
+test("ClaudeCliHarness rejects with the spawn error when `claude` cannot be started", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "factory-floor-no-claude-"));
+  const harness = new ClaudeCliHarness();
+
+  const originalPath = process.env.PATH ?? "";
+  process.env.PATH = dir;
+  try {
+    await assert.rejects(harness.run({ cwd: dir, prompt: "irrelevant" }), { code: "ENOENT" });
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
+test(
+  "ClaudeCliHarness kills the subprocess and rethrows when a callback throws",
+  { timeout: 10_000 },
+  async () => {
+    const dir = mkdtempSync(join(tmpdir(), "factory-floor-fake-claude-"));
+    const pidPath = writeHangingFakeClaude(dir);
+
+    const harness = new ClaudeCliHarness();
+    const boom = new Error("callback failed");
+
+    const originalPath = process.env.PATH ?? "";
+    process.env.PATH = `${dir}:${originalPath}`;
+    try {
+      await assert.rejects(
+        harness.run({
+          cwd: dir,
+          prompt: "irrelevant",
+          onToolCall: () => {
+            throw boom;
+          },
+        }),
+        boom,
+      );
+    } finally {
+      process.env.PATH = originalPath;
+    }
+
+    const pid = Number(readFileSync(pidPath, "utf8"));
+    assert.equal(isAlive(pid), false, `expected fake claude (pid ${pid}) to have been killed`);
+  },
+);
+
+test("ClaudeCliHarness forwards stderr, handles a final line without a trailing newline and reports a non-zero exit", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "factory-floor-fake-claude-"));
+  const text = JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "text", text: "partial" }] },
+  });
+  const script = `#!/usr/bin/env node
+process.stderr.write("oops\\n");
+process.stdout.write(${JSON.stringify(text)}, () => process.exit(3));
+`;
+  writeFileSync(join(dir, "claude"), script, "utf8");
+  chmodSync(join(dir, "claude"), 0o755);
+
+  const harness = new ClaudeCliHarness();
+  const chunks: [string, string][] = [];
+
+  const originalPath = process.env.PATH ?? "";
+  process.env.PATH = `${dir}:${originalPath}`;
+  let result;
+  try {
+    result = await harness.run({
+      cwd: dir,
+      prompt: "irrelevant",
+      onOutputChunk: (chunk, stream) => chunks.push([stream, chunk]),
+    });
+  } finally {
+    process.env.PATH = originalPath;
+  }
+
+  assert.equal(result.success, false);
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.stdout, `${text}\n`);
+  assert.equal(result.stderr, "oops\n");
+  assert.deepEqual(
+    chunks.toSorted(([a], [b]) => a.localeCompare(b)),
+    [
+      ["stderr", "oops\n"],
+      ["stdout", "partial"],
+    ],
   );
 });

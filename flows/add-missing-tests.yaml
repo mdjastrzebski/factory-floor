@@ -1,0 +1,36 @@
+# Example factory-floor flow: "add-missing-tests".
+#
+# A generic, three-step template — identify -> implement & verify ->
+# review & refine — for having an AI coding agent find and fill test
+# coverage gaps in whatever codebase lives in this flow's `cwd`. The step
+# prompts below are intentionally codebase-agnostic: they describe what to
+# do in terms of "the codebase in this directory", not any specific file.
+#
+# `cwd: ..` points at the repo root, since this file lives in flows/.
+id: add-missing-tests
+name: Add missing tests
+cwd: ..
+steps:
+  - id: identify-test-scenarios
+    name: Identify test scenarios
+    prompt: |
+      Review the codebase in this directory. Identify the most important,
+      currently-untested behaviors and the most meaningful test scenarios
+      and edge cases to cover for them. Write findings as a prioritized
+      list to TEST_PLAN.md. No test code yet.
+
+  - id: implement-and-run-tests
+    name: Implement and run tests
+    prompt: |
+      Read TEST_PLAN.md, implement tests covering its scenarios (following
+      the project's existing test conventions, or node:test/node:assert if
+      there are none yet), run the suite, and fix bugs (in the
+      implementation or the tests) until it's green.
+
+  - id: review-and-refine-tests
+    name: Review and refine tests
+    prompt: |
+      Review the tests just added against TEST_PLAN.md for quality and
+      completeness (meaningful assertions, no redundancy, nothing from the
+      plan missed), tighten/add/remove tests as needed, and rerun to
+      confirm still green.

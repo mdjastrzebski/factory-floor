@@ -20,6 +20,22 @@ export interface HarnessResult {
   permissionDenials?: string[];
 }
 
+/** A tool call the agent started, as a short structured summary (not the full tool input). */
+export interface ToolCall {
+  /** Tool name as reported by the agent, e.g. `Edit` or `Bash`. */
+  name: string;
+  /** The tool's primary argument when trivially available (e.g. a file path or command). */
+  detail?: string;
+  /**
+   * Generic, human-readable description of what the tool does (e.g. "Running
+   * command" for `Bash`), for display where exact arguments would be noise.
+   * Each harness knows its own tool vocabulary and fills this in; callers
+   * that don't care about a specific harness should prefer this over `name`.
+   * Falls back to `name` when a harness has no label for the tool.
+   */
+  activity?: string;
+}
+
 export interface HarnessRunOptions {
   /** Working directory the harness process should run in. */
   cwd: string;
@@ -31,6 +47,11 @@ export interface HarnessRunOptions {
    * addition to - not instead of - the buffered result returned by `run`.
    */
   onOutputChunk?: (chunk: string, stream: "stdout" | "stderr") => void;
+  /**
+   * Optional callback invoked each time the agent starts a tool call, for
+   * live activity display (e.g. a spinner). Independent of `onOutputChunk`.
+   */
+  onToolCall?: (call: ToolCall) => void;
   /**
    * Optional AbortSignal; when aborted, the harness should terminate its
    * in-flight process (e.g. on SIGINT) rather than leave it running.
