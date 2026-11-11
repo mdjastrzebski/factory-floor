@@ -21,8 +21,24 @@ export class ClaudeCliHarness implements Harness {
   async run(options: HarnessRunOptions): Promise<HarnessResult> {
     const { cwd, prompt, onOutputChunk, onToolCall, signal } = options;
 
-    // `signal` is passed through to `child_process.spawn`, which sends the
-    // child SIGTERM (its default `killSignal`) when the signal aborts.
+    // The spawn signal is passed through to `child_process.spawn`, which sends
+    // the child SIGTERM (its default `killSignal`) when the signal aborts. It
+    // also aborts on `internalController`, used to kill the child when a
+    // callback throws: nano-spawn's iterators await the subprocess when the
+    // loop exits early, so without a kill `run` would wait for the child to
+    // exit on its own (or hang if it blocks on an undrained pipe).
+    const internalController = new AbortController();
+    const spawnSignal = signal
+      ? AbortSignal.any([signal, internalController.signal])
+      : internalController.signal;
+    const callback = <A extends unknown[]>(fn: ((...args: A) => void) | undefined, ...args: A) => {
+      try {
+        fn?.(...args);
+      } catch (error) {
+        internalController.abort();
+        throw error;
+      }
+    };
     const subprocess = spawn(
       "claude",
       [
@@ -36,7 +52,7 @@ export class ClaudeCliHarness implements Harness {
         "stream-json",
         "--verbose",
       ],
-      { cwd, signal, stdin: "ignore" },
+      { cwd, signal: spawnSignal, stdin: "ignore" },
     );
 
     let started = false;
@@ -61,10 +77,10 @@ export class ClaudeCliHarness implements Harness {
         const parsed = parseStreamJsonLine(line);
         if (!parsed) continue;
         for (const chunk of parsed.displayChunks) {
-          onOutputChunk?.(chunk, "stdout");
+          callback(onOutputChunk, chunk, "stdout");
         }
         for (const call of parsed.toolCalls) {
-          onToolCall?.(call);
+          callback(onToolCall, call);
         }
         permissionDenials.push(...parsed.denials);
       }
@@ -73,7 +89,7 @@ export class ClaudeCliHarness implements Harness {
     const readStderr = async () => {
       for await (const line of subprocess.stderr) {
         stderr += `${line}\n`;
-        onOutputChunk?.(`${line}\n`, "stderr");
+        callback(onOutputChunk, `${line}\n`, "stderr");
       }
     };
 

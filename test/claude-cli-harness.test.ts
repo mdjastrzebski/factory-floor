@@ -148,3 +148,35 @@ test("ClaudeCliHarness rejects with the spawn error when `claude` cannot be star
     process.env.PATH = originalPath;
   }
 });
+
+test(
+  "ClaudeCliHarness kills the subprocess and rethrows when a callback throws",
+  { timeout: 10_000 },
+  async () => {
+    const dir = mkdtempSync(join(tmpdir(), "factory-floor-fake-claude-"));
+    const pidPath = writeHangingFakeClaude(dir);
+
+    const harness = new ClaudeCliHarness();
+    const boom = new Error("callback failed");
+
+    const originalPath = process.env.PATH ?? "";
+    process.env.PATH = `${dir}:${originalPath}`;
+    try {
+      await assert.rejects(
+        harness.run({
+          cwd: dir,
+          prompt: "irrelevant",
+          onToolCall: () => {
+            throw boom;
+          },
+        }),
+        boom,
+      );
+    } finally {
+      process.env.PATH = originalPath;
+    }
+
+    const pid = Number(readFileSync(pidPath, "utf8"));
+    assert.equal(isAlive(pid), false, `expected fake claude (pid ${pid}) to have been killed`);
+  },
+);
