@@ -6,15 +6,41 @@ export type TemplateSegment =
 /** Thrown by {@link parseTemplate} for malformed `${{ … }}` syntax. */
 export class TemplateSyntaxError extends Error {}
 
+/** Everything the built-in variables and `inputs.<id>` are computed from. */
+export interface VariableContext {
+  flow: { id: string; name: string };
+  /** Resolved working directory of the flow. */
+  cwd: string;
+  runId: string;
+  runDir: string;
+  stepId: string;
+  /** Resolved input values keyed by input id. */
+  inputs: Readonly<Record<string, string>>;
+}
+
+/**
+ * The single registry of built-in variables. Validation ({@link checkReferences})
+ * and rendering ({@link buildVariables}) both derive from it, so they cannot drift.
+ */
+const BUILTINS = {
+  "flow.id": (ctx) => ctx.flow.id,
+  "flow.name": (ctx) => ctx.flow.name,
+  "flow.cwd": (ctx) => ctx.cwd,
+  "run.id": (ctx) => ctx.runId,
+  "run.dir": (ctx) => ctx.runDir,
+  "step.id": (ctx) => ctx.stepId,
+} satisfies Record<string, (ctx: VariableContext) => string>;
+
 /** Built-in variables available in every step prompt, in addition to `inputs.<id>`. */
-export const BUILTIN_VARIABLES = [
-  "flow.id",
-  "flow.name",
-  "flow.cwd",
-  "run.id",
-  "run.dir",
-  "step.id",
-] as const;
+export const BUILTIN_VARIABLES = Object.keys(BUILTINS) as readonly (keyof typeof BUILTINS)[];
+
+/** Builds the flat name-to-value map for {@link renderTemplate}: every built-in plus `inputs.<id>`. */
+export function buildVariables(ctx: VariableContext): Record<string, string> {
+  const vars: Record<string, string> = {};
+  for (const [name, get] of Object.entries(BUILTINS)) vars[name] = get(ctx);
+  for (const [id, value] of Object.entries(ctx.inputs)) vars[`inputs.${id}`] = value;
+  return vars;
+}
 
 const OPEN = "${{";
 const CLOSE = "}}";

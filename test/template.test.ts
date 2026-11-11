@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   BUILTIN_VARIABLES,
   TemplateSyntaxError,
+  buildVariables,
   checkReferences,
   listReferences,
   parseTemplate,
@@ -104,4 +105,19 @@ test("checkReferences reports undeclared inputs, unknown variables and syntax er
   }
   assert.equal(checkReferences("${{ inputs.a | x }}", ["a"]).length, 1);
   assert.equal(checkReferences("${{ inputs.a", ["a"]).length, 1);
+});
+
+test("buildVariables supplies every built-in and input that checkReferences accepts", () => {
+  const text = BUILTIN_VARIABLES.map((name) => `\${{ ${name} }}`).join(" ") + " ${{ inputs.a }}";
+  assert.deepEqual(checkReferences(text, ["a"]), []);
+  const vars = buildVariables({
+    flow: { id: "f", name: "F" },
+    cwd: "/cwd",
+    runId: "r1",
+    runDir: "/cwd/runs/r1",
+    stepId: "s1",
+    inputs: { a: "A" },
+  });
+  assert.deepEqual(Object.keys(vars).sort(), [...BUILTIN_VARIABLES, "inputs.a"].sort());
+  assert.equal(renderTemplate(text, vars), "f F /cwd r1 /cwd/runs/r1 s1 A");
 });

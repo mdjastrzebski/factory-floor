@@ -2,7 +2,7 @@ import { mkdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { Harness, HarnessResult, ToolCall } from "./harness.ts";
 import { loadFlow, type Flow } from "./flow-schema.ts";
-import { renderTemplate } from "./template.ts";
+import { buildVariables, renderTemplate } from "./template.ts";
 
 export interface FlowStartInfo {
   id: string;
@@ -167,15 +167,6 @@ export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
   mkdirSync(runDir, { recursive: true });
   writeFileSync(join(runDir, "inputs.json"), `${JSON.stringify(inputs, null, 2)}\n`, "utf8");
 
-  const baseVars: Record<string, string> = {
-    "flow.id": flow.id,
-    "flow.name": flow.name,
-    "flow.cwd": cwd,
-    "run.id": timestamp,
-    "run.dir": runDir,
-  };
-  for (const [id, value] of Object.entries(inputs)) baseVars[`inputs.${id}`] = value;
-
   const total = flow.steps.length;
   onFlowStart?.({ id: flow.id, name: flow.name, total });
 
@@ -184,7 +175,10 @@ export async function runFlow(options: RunFlowOptions): Promise<RunFlowResult> {
     const index = i + 1;
     const logPath = join(runDir, `${step.id}.log`);
 
-    const prompt = renderTemplate(step.prompt, { ...baseVars, "step.id": step.id });
+    const prompt = renderTemplate(
+      step.prompt,
+      buildVariables({ flow, cwd, runId: timestamp, runDir, stepId: step.id, inputs }),
+    );
 
     onStepStart?.({ index, total, id: step.id, name: step.name });
     const startedAt = Date.now();
