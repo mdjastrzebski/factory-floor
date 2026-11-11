@@ -218,7 +218,11 @@ test("non-interactive output: undefined isTTY, TERM=dumb, and non-TTY all skip e
   t.mock.timers.enable({ apis: ["setInterval"] });
   const cases: [string, FakeTerminal, string | undefined][] = [
     ["isTTY false", new FakeTerminal(80, false), undefined],
-    ["isTTY undefined", Object.assign(new FakeTerminal(80), { isTTY: undefined }) as never, undefined],
+    [
+      "isTTY undefined",
+      Object.assign(new FakeTerminal(80), { isTTY: undefined }) as never,
+      undefined,
+    ],
     ["TERM=dumb", new FakeTerminal(80, true), "dumb"],
   ];
   const originalTerm = process.env.TERM;

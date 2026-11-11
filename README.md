@@ -17,37 +17,53 @@ implement tests for it."
 A flow is a YAML file with this shape:
 
 ```yaml
-# optional, just for your own reference
-name: my-flow
+# optional slug identifier; defaults to a slug of this file's name
+id: my-flow
+# optional human-readable title; defaults to `id`
+name: My flow
 
 # optional; defaults to the directory containing this flow file
 cwd: ./somewhere
 
 steps:
-  - name: step-one # required, must be unique within the flow
+  - id: step-one # optional slug identifier, unique within the flow
+    name: Do the first thing # optional human-readable label
     prompt: | # required; multi-line via YAML block scalar
       Do the first thing. Be specific about what "done" looks like.
 
-  - name: step-two
+  - name: Step two # id defaults to a slug of the name: "step-two"
     prompt: |
       Do the second thing, coordinating with step one only via files
       already on disk in this directory.
 ```
 
-- `name` (top-level, optional) — a label for the flow; not currently used
-  for anything but documentation.
+Naming follows GitHub Actions: `id` is the stable, machine-facing
+identifier and `name` is what people read.
+
+- `id` (top-level, optional) — the flow's slug identifier. Lowercase
+  letters, digits, `-` and `_`, starting with a letter or digit. Defaults to
+  a slug of the flow file's base name (`Add Tests.yaml` → `add-tests`), much
+  like a GitHub workflow is identified by its file name.
+- `name` (top-level, optional) — the flow's human-readable title, shown when
+  the run starts. Defaults to `id`.
 - `cwd` (optional) — the working directory every step runs in, resolved
   relative to the flow file's own directory if not absolute. Defaults to
   the directory containing the flow file. Shared across all steps.
 - `steps` (required, non-empty array) — run strictly in order. Each step
-  needs:
-  - `name` (required, non-empty, unique within the flow) — used for
-    progress output and the step's log filename.
+  needs an `id`, a `name`, or both:
+  - `id` (optional, same format as the flow `id`, unique within the flow) —
+    names the step's log file and prefixes its `--verbose` output and
+    warnings. Defaults to a slug of `name`; if two steps' names slugify to
+    the same id (or to another step's explicit id), later ones get `-2`,
+    `-3`, etc.
+  - `name` (optional, non-empty) — the label shown in progress output.
+    Defaults to `id`. Steps without an `id` must have unique names.
   - `prompt` (required, non-empty string) — passed as-is to the harness.
 
 The flow file is parsed with the `yaml` package and validated with `zod`
 before anything runs. An invalid flow (missing `steps`, a step missing
-`name`/`prompt`, duplicate step names, a non-existent `cwd`, etc.) is
+both `id` and `name`, a step missing `prompt`, a malformed or duplicate step
+`id`, a non-existent `cwd`, etc.) is
 rejected with a clear error and a non-zero exit code, and no agent process
 is spawned.
 
@@ -87,7 +103,7 @@ Flow failed at step "review-and-refine-tests". Logs: examples/hello-flow/.factor
 
 The harness's own stdout/stderr is **not** printed by default. Pass
 `--verbose` to additionally stream each step's raw output live to the
-terminal as it's produced, prefixed with the step name and stream.
+terminal as it's produced, prefixed with the step id and stream.
 
 If any step exits non-zero, the flow stops immediately — later steps never
 run — and `factory-floor` exits non-zero. If every step succeeds, it exits 0. Pressing Ctrl-C (SIGINT) while a step is running kills that step's
@@ -100,22 +116,21 @@ step is always written to disk, so nothing is ever lost even in default
 (terse) mode:
 
 ```
-<cwd>/.factory-floor/runs/<ISO-timestamp>/<step-slug>.log
+<cwd>/.factory-floor/runs/<ISO-timestamp>/<step-id>.log
 ```
 
 - `<cwd>` is the flow's working directory (see above).
 - `<ISO-timestamp>` identifies one run of the flow (one directory per
   `factory-floor run` invocation).
-- `<step-slug>` is the step's `name`, lowercased with non-alphanumeric
-  characters collapsed to `-`; if two steps slugify to the same name, later
-  ones get `-2`, `-3`, etc.
+- `<step-id>` is the step's `id` (explicit, or derived from its `name` as
+  described above).
 
 `.factory-floor/` is gitignored by this project's own `.gitignore`, and
 you'll likely want the same in any repo you point a flow at.
 
 ## Trying the bundled example
 
-`examples/hello-flow/` ships a working example flow, `flow.yaml`, named
+`examples/hello-flow/` ships a working example flow, `flow.yaml`, with id
 `add-missing-tests`. It's a generic, three-step template — identify gaps,
 implement and verify tests, then review and refine them — that reads
 sensibly against _any_ codebase dropped into its directory, not just the

@@ -4,6 +4,7 @@ import { FlowValidationError } from "../flow-schema.ts";
 import type { ToolCall } from "../harness.ts";
 import {
   FlowRunError,
+  type FlowStartInfo,
   type RunFlowResult,
   type StepCompleteInfo,
   type StepStartInfo,
@@ -17,10 +18,11 @@ import type { Spinner } from "./spinner.ts";
  * so the SIGINT handler and the callbacks agree on what has been printed.
  */
 export interface FlowReporter {
+  onFlowStart(info: FlowStartInfo): void;
   onStepStart(info: StepStartInfo): void;
   /** Undefined in verbose mode, where the raw output already shows tool calls. */
-  onToolCall?: (stepName: string, call: ToolCall) => void;
-  onWarning(stepName: string, message: string): void;
+  onToolCall?: (stepId: string, call: ToolCall) => void;
+  onWarning(stepId: string, message: string): void;
   onStepComplete(info: StepCompleteInfo): void;
   /** Called on SIGINT, before the run is aborted. */
   cancel(): void;
@@ -35,7 +37,7 @@ export interface FlowReporterDeps {
   /** Plain line output, used in verbose mode (`console` in the CLI). */
   print: { log(message: string): void; error(message: string): void };
   /** Clack-style log lines (`log` from `@clack/prompts` in the CLI). */
-  log: { warn(message: string): void; error(message: string): void };
+  log: { info(message: string): void; warn(message: string): void; error(message: string): void };
   /** Clack-style closing line (`outro` from `@clack/prompts` in the CLI). */
   outro(message: string): void;
   createSpinner(): Spinner;
@@ -44,12 +46,20 @@ export interface FlowReporterDeps {
 }
 
 interface ActiveStep {
+  id: string;
   name: string;
   /** `[i/total] <step name>`, the spinner's base text. */
   label: string;
   spinner: Spinner;
   /** Tool calls seen so far this step, for the running count in the spinner. */
   toolCallCount: number;
+}
+
+/** `<name> (<id>) · <n> steps`, omitting the id when the name defaulted to it. */
+export function flowTitle({ id, name, total }: FlowStartInfo): string {
+  const steps = `${total} step${total === 1 ? "" : "s"}`;
+  const idSuffix = name === id ? "" : ` (${id})`;
+  return `${name}${idSuffix} · ${steps}`;
 }
 
 export function formatDuration(ms: number): string {
@@ -103,6 +113,14 @@ export function createFlowReporter(deps: FlowReporterDeps): FlowReporter {
   };
 
   const shared = {
+    onFlowStart(info: FlowStartInfo): void {
+      stepCount = info.total;
+      if (verbose) {
+        print.log(`Flow: ${flowTitle(info)}`);
+      } else {
+        log.info(pc.bold(flowTitle(info)));
+      }
+    },
     cancel(): void {
       cancelled = true;
       if (active) {
@@ -149,8 +167,8 @@ export function createFlowReporter(deps: FlowReporterDeps): FlowReporter {
         stepCount = total;
         print.log(`[${index}/${total}] ${name}...`);
       },
-      onWarning: (stepName, message) => {
-        print.error(`warning: [${stepName}] ${message}`);
+      onWarning: (stepId, message) => {
+        print.error(`warning: [${stepId}] ${message}`);
       },
       onStepComplete: ({ index, total, name, success, durationMs, logPath }) => {
         if (!success) failedLogPath = logPath;
@@ -167,22 +185,22 @@ export function createFlowReporter(deps: FlowReporterDeps): FlowReporter {
 
   return {
     ...shared,
-    onStepStart: ({ index, total, name }) => {
+    onStepStart: ({ index, total, id, name }) => {
       stepCount = total;
       const label = `[${index}/${total}] ${name}`;
       const s = deps.createSpinner();
       s.start(label);
-      active = { name, label, spinner: s, toolCallCount: 0 };
+      active = { id, name, label, spinner: s, toolCallCount: 0 };
     },
-    onToolCall: (stepName, call) => {
-      if (active?.name === stepName) {
+    onToolCall: (stepId, call) => {
+      if (active?.id === stepId) {
         active.toolCallCount++;
         active.spinner.message(toolCallMessage(active.label, call, active.toolCallCount));
       }
     },
-    onWarning: (stepName, message) => {
+    onWarning: (stepId, message) => {
       active?.spinner.erase();
-      log.warn(pc.yellow(`[${stepName}] ${message}`));
+      log.warn(pc.yellow(`[${stepId}] ${message}`));
     },
     onStepComplete: ({ name, success, durationMs, logPath }) => {
       if (!success) failedLogPath = logPath;

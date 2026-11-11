@@ -33,12 +33,13 @@ async function runCommand(flowPath: string, { verbose }: { verbose: boolean }): 
       verbose,
       harness,
       signal: controller.signal,
+      onFlowStart: reporter.onFlowStart,
       onStepStart: reporter.onStepStart,
       onToolCall: reporter.onToolCall,
       onWarning: reporter.onWarning,
       onStepComplete: reporter.onStepComplete,
-      onOutputChunk: (stepName, chunk, stream) => {
-        const prefix = `[${stepName}:${stream}] `;
+      onOutputChunk: (stepId, chunk, stream) => {
+        const prefix = `[${stepId}:${stream}] `;
         const text = chunk
           .split("\n")
           .map((line, i, arr) => (i === arr.length - 1 && line === "" ? line : prefix + line))

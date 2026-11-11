@@ -33,7 +33,7 @@ export function parseStreamJsonLine(line: string): ParsedStreamJsonLine | undefi
     return { displayChunks: [`${line}\n`], toolCalls: [], denials: [] };
   }
 
-  if (typeof event !== "object" || event === null) return undefined;
+  if (typeof event !== "object" || event === null || Array.isArray(event)) return undefined;
   const e = event as Record<string, unknown>;
 
   const displayChunks: string[] = [];
@@ -52,7 +52,11 @@ export function parseStreamJsonLine(line: string): ParsedStreamJsonLine | undefi
         const detail = toolCallDetail(b.input);
         displayChunks.push(`→ ${b.name}${detail ? ` ${detail.split("\n")[0].trim()}` : ""}\n`);
         const activity = TOOL_ACTIVITY[b.name];
-        toolCalls.push({ name: b.name, ...(detail !== undefined && { detail }), ...(activity && { activity }) });
+        toolCalls.push({
+          name: b.name,
+          ...(detail !== undefined && { detail }),
+          ...(activity && { activity }),
+        });
       }
     }
   } else if (e.type === "result") {

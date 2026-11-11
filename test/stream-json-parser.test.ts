@@ -20,6 +20,7 @@ test("parseStreamJsonLine ignores non-object JSON values", () => {
   assert.equal(parseStreamJsonLine("42"), undefined);
   assert.equal(parseStreamJsonLine('"a string"'), undefined);
   assert.equal(parseStreamJsonLine("null"), undefined);
+  assert.equal(parseStreamJsonLine("[]"), undefined);
 });
 
 test("parseStreamJsonLine extracts assistant text blocks", () => {
@@ -154,4 +155,16 @@ test("describeDenial renders tool + reason from an object denial", () => {
 test("describeDenial falls back to JSON for unrecognized shapes", () => {
   assert.equal(describeDenial({ foo: "bar" }), JSON.stringify({ foo: "bar" }));
   assert.equal(describeDenial(42), "42");
+});
+
+test("parseStreamJsonLine shows only the trimmed first line of a multi-line command, keeping the full detail", () => {
+  const line = JSON.stringify({
+    type: "assistant",
+    message: {
+      content: [{ type: "tool_use", name: "Bash", input: { command: "  echo a\necho b" } }],
+    },
+  });
+  const result = parseStreamJsonLine(line);
+  assert.equal(result?.toolCalls[0].detail, "  echo a\necho b");
+  assert.deepEqual(result?.displayChunks, ["→ Bash echo a\n"]);
 });

@@ -35,3 +35,21 @@ test("uniqueSlug treats differently-cased/punctuated names that collapse to the 
   assert.equal(uniqueSlug("Build!", used), "build");
   assert.equal(uniqueSlug("build", used), "build-2");
 });
+
+test("slugify falls back for non-ASCII-only names, and uniqueSlug numbers the repeats", () => {
+  assert.equal(slugify("日本語"), "step");
+  assert.equal(slugify("😀", "flow"), "flow");
+  const used = new Set<string>();
+  assert.deepEqual(
+    ["日本語", "😀", "x"].map((n) => uniqueSlug(n, used)),
+    ["step", "step-2", "x"],
+  );
+});
+
+test("uniqueSlug doesn't collide with a name that already looks suffixed", () => {
+  const used = new Set<string>();
+  assert.deepEqual(
+    ["a", "a", "a-2"].map((n) => uniqueSlug(n, used)),
+    ["a", "a-2", "a-2-2"],
+  );
+});
